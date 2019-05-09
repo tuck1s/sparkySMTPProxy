@@ -1,19 +1,22 @@
 package main
 
 import (
-	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"io"
-	"io/ioutil"
 	"log"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 )
+
+const upstream_host_port = "smtp.eu.sparkpostmail.com:587"
+
+//const upstream_host_port = "bouncy-sink.trymsys.net:25"		// Use this value to test STARTTLS error handling
 
 // The Backend implements SMTP server methods.
 type Backend struct {
@@ -25,8 +28,27 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 		return nil, errors.New("Empty username or password")
 	}
 	var s Session
-	s.username = username
-	s.password = password
+	c, err := smtp.Dial(upstream_host_port)
+	if err != nil {
+		return nil, err
+	}
+	s.upstream = c
+
+	// STARTTLS on upstream host
+	host, _, _ := net.SplitHostPort(upstream_host_port)
+	tlsconfig := &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         host,
+	}
+	if err = c.StartTLS(tlsconfig); err != nil {
+		return nil, err
+	}
+
+	// Authenticate towards upstream host. If rejected, then pass error back to client
+	auth := sasl.NewPlainClient("", username, password)
+	if err = c.Auth(auth); err != nil {
+		return nil, err
+	}
 	return &s, nil
 }
 
@@ -37,66 +59,63 @@ func (bkd *Backend) AnonymousLogin(state *smtp.ConnectionState) (smtp.Session, e
 
 // A Session is returned after successful login. Here we build up information until it's fully formed, then send the mail upstream
 type Session struct {
-	username string
-	password string
 	mailfrom string
 	rcptto   []string // Can have more than one recipient
+	upstream *smtp.Client
 }
 
 func (s *Session) Mail(from string) error {
-	log.Println("Mail from:", from)
+	if err := s.upstream.Mail(from); err != nil {
+		return err
+	}
 	s.mailfrom = from
 	return nil
 }
 
 func (s *Session) Rcpt(to string) error {
-	log.Println("Rcpt to:", to)
+	if err := s.upstream.Rcpt(to); err != nil {
+		return err
+	}
 	s.rcptto = append(s.rcptto, to)
 	return nil
 }
 
 func (s *Session) Data(r io.Reader) error {
-	if b, err := ioutil.ReadAll(r); err != nil {
+	w, err := s.upstream.Data()
+	if err != nil {
 		return err
-	} else {
-		submit_to_upstream("smtp.eu.sparkpostmail.com:587", s, b)
+	}
+	_, err = io.Copy(w, r)
+	if err != nil {
+		return err
+	}
+	err = w.Close()
+	if err != nil {
+		return err // TODO: make a special smtperr type so errors get reported transparently
 	}
 	return nil
 }
 
 func (s *Session) Reset() {
-	s.username = ""
-	s.password = ""
-	s.mailfrom = ""
-	s.rcptto = nil
+	s.Logout()
 }
 
 func (s *Session) Logout() error {
-	s.username = ""
-	s.password = ""
+	// Close the upstream connection gracefully, if it's open
+	if s.upstream != nil {
+		if err := s.upstream.Quit(); err != nil {
+			return err
+		}
+		s.upstream = nil
+	}
 	s.mailfrom = ""
 	s.rcptto = nil
 	return nil
 }
 
-// function to submit a mail to upstream mailserver
-func submit_to_upstream(host_port string, s *Session, data []byte) {
-	// Set up authentication information.
-	auth := sasl.NewPlainClient("", s.username, s.password)
-
-	r := bytes.NewReader(data)
-	err := smtp.SendMail(host_port, auth, s.mailfrom, s.rcptto, r)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	log.Println("From", s.mailfrom, "To", s.rcptto, "Sent via ", host_port, "data length", len(data), "bytes")
-}
-
 /*TODO:
-Proper transparency of upstream server's error messages back to the client. At the moment we get the smtp lib's messages
-Establish upstream connection earlier, and fail if user/pass auth fails upstream server's checks. That would require use
- of separate conversation steps with Hello / Auth / Mail / Data / Quit methods
+Proper transparency of upstream server's error messages back to the client.
+At the moment we get the smtp lib's messages.
 */
 
 func main() {
