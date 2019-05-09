@@ -16,8 +16,6 @@ import (
 
 const upstream_host_port = "smtp.eu.sparkpostmail.com:587"
 
-//const upstream_host_port = "bouncy-sink.trymsys.net:25"		// Use this value to test STARTTLS error handling
-
 // The Backend implements SMTP server methods.
 type Backend struct {
 }
@@ -97,7 +95,7 @@ func (s *Session) Data(r io.Reader) error {
 }
 
 func (s *Session) Reset() {
-	s.Logout()
+	_ = s.Logout()
 }
 
 func (s *Session) Logout() error {
