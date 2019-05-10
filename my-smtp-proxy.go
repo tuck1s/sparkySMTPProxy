@@ -82,13 +82,13 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 	bkd.logger("-> LOGIN from", state.Hostname, state.RemoteAddr)
 
 	c, err := smtp.Dial(*bkd.out_hostport)
-	bkd.logger("<- LOGIN to", *bkd.out_hostport, err)
-
 	if err != nil {
+		bkd.logger("<- LOGIN error", *bkd.out_hostport, err)
 		return nil, err
 	}
+	bkd.logger("<- LOGIN success", *bkd.out_hostport, err)
 	s.upstream = c
-	s.verbose = *bkd.verbose
+	s.verbose = *bkd.verbose // pass logging flag into session
 
 	// STARTTLS on upstream host, checking its cert is also valid
 	host, _, _ := net.SplitHostPort(*bkd.out_hostport)
@@ -97,18 +97,18 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 		ServerName:         host,
 	}
 	if err = c.StartTLS(tlsconfig); err != nil {
-		bkd.logger("-> STARTTLS failed", err)
+		bkd.logger("-> STARTTLS error", err)
 		return nil, err
 	}
-	bkd.logger("-> STARTTLS succeeded")
+	bkd.logger("-> STARTTLS success")
 
 	// Authenticate towards upstream host. If rejected, then pass error back to client
 	auth := sasl.NewPlainClient("", username, password)
 	if err := c.Auth(auth); err != nil {
-		bkd.logger("<~ AUTH failed", err)
+		bkd.logger("<~ AUTH error", err)
 		return nil, errToSmtpErr(err)
 	}
-	bkd.logger("<~ AUTH succeeded")
+	bkd.logger("<~ AUTH success")
 	return &s, nil
 }
 
