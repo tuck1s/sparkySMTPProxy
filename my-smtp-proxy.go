@@ -3,37 +3,86 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
+	"github.com/emersion/go-sasl"
+	"github.com/emersion/go-smtp"
 	"io"
 	"log"
 	"net"
+	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
-
-	"github.com/emersion/go-sasl"
-	"github.com/emersion/go-smtp"
 )
 
-const upstream_host_port = "smtp.eu.sparkpostmail.com:587"
+const upstreamHostPort = "smtp.eu.sparkpostmail.com:587"
 
 // The Backend implements SMTP server methods.
 type Backend struct {
 }
 
+func byteDigitToInt(c byte) (int, error) {
+	return strconv.Atoi(string(c))
+}
+
+// Make an EnhancedCode type out of three bytes
+func makeEnhancedCode(c0, c1, c2 byte) smtp.EnhancedCode {
+	d0, err0 := byteDigitToInt(c0)
+	d1, err1 := byteDigitToInt(c1)
+	d2, err2 := byteDigitToInt(c2)
+
+	if err0 == nil && err1 == nil && err2 == nil {
+		return smtp.EnhancedCode{
+			d0,
+			d1,
+			d2,
+		}
+	} else {
+		log.Println("Unexpected enhanced code values", string(c0), string(c1), string(c2))
+		return smtp.EnhancedCodeNotSet
+	}
+}
+
+// Check and convert error to SMTPError type, which includes an enhanced code attribute
+func errToSmtpErr(e error) *smtp.SMTPError {
+	if smtpErr, ok := e.(*smtp.SMTPError); ok {
+		return smtpErr
+	}
+	if tp, ok := e.(*textproto.Error); ok {
+		// promote textproto.Error type
+		enh := smtp.EnhancedCodeNotSet
+		if len(tp.Msg) >= 6 {
+			s := tp.Msg[:6]
+			if s[1] == '.' && s[3] == '.' && s[5] == ' ' {
+				enh = makeEnhancedCode(s[0], s[2], s[4])
+				// remove enhanced code from front of string
+				tp.Msg = tp.Msg[6:]
+			}
+		}
+		return &smtp.SMTPError{
+			Code:         tp.Code,
+			EnhancedCode: enh,
+			Message:      tp.Msg,
+		}
+	}
+	// default - we just have text, placeholders for the rest
+	return &smtp.SMTPError{
+		Code:         0,
+		EnhancedCode: smtp.EnhancedCodeNotSet,
+		Message:      e.Error(),
+	}
+}
+
 // Login handles a login command with username and password.
 func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
-	if username == "" || password == "" {
-		return nil, errors.New("Empty username or password")
-	}
 	var s Session
-	c, err := smtp.Dial(upstream_host_port)
+	c, err := smtp.Dial(upstreamHostPort)
 	if err != nil {
 		return nil, err
 	}
 	s.upstream = c
 
 	// STARTTLS on upstream host
-	host, _, _ := net.SplitHostPort(upstream_host_port)
+	host, _, _ := net.SplitHostPort(upstreamHostPort)
 	tlsconfig := &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         host,
@@ -44,8 +93,8 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 
 	// Authenticate towards upstream host. If rejected, then pass error back to client
 	auth := sasl.NewPlainClient("", username, password)
-	if err = c.Auth(auth); err != nil {
-		return nil, err
+	if err := c.Auth(auth); err != nil {
+		return nil, errToSmtpErr(err)
 	}
 	return &s, nil
 }
@@ -64,7 +113,7 @@ type Session struct {
 
 func (s *Session) Mail(from string) error {
 	if err := s.upstream.Mail(from); err != nil {
-		return err
+		return errToSmtpErr(err)
 	}
 	s.mailfrom = from
 	return nil
@@ -72,7 +121,7 @@ func (s *Session) Mail(from string) error {
 
 func (s *Session) Rcpt(to string) error {
 	if err := s.upstream.Rcpt(to); err != nil {
-		return err
+		return errToSmtpErr(err)
 	}
 	s.rcptto = append(s.rcptto, to)
 	return nil
@@ -89,7 +138,7 @@ func (s *Session) Data(r io.Reader) error {
 	}
 	err = w.Close()
 	if err != nil {
-		return err // TODO: make a special smtperr type so errors get reported transparently
+		return errToSmtpErr(err)
 	}
 	return nil
 }
@@ -102,7 +151,7 @@ func (s *Session) Logout() error {
 	// Close the upstream connection gracefully, if it's open
 	if s.upstream != nil {
 		if err := s.upstream.Quit(); err != nil {
-			return err
+			return errToSmtpErr(err)
 		}
 		s.upstream = nil
 	}
