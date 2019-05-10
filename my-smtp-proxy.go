@@ -86,7 +86,7 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 		bkd.logger("<- LOGIN error", *bkd.out_hostport, err)
 		return nil, err
 	}
-	bkd.logger("<- LOGIN success", *bkd.out_hostport, err)
+	bkd.logger("<- LOGIN success", *bkd.out_hostport)
 	s.upstream = c
 	s.verbose = *bkd.verbose // pass logging flag into session
 
