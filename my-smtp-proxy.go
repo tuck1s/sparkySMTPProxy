@@ -79,14 +79,14 @@ func errToSmtpErr(e error) *smtp.SMTPError {
 // Login handles a login command with username and password.
 func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
 	var s Session
-	bkd.logger("-> LOGIN from", state.Hostname, state.RemoteAddr, username, password)
+	bkd.logger("~> LOGIN from", state.Hostname, state.RemoteAddr, username, password)
 
 	c, err := smtp.Dial(*bkd.out_hostport)
 	if err != nil {
-		bkd.logger("<- LOGIN error", *bkd.out_hostport, err)
+		bkd.logger("\t<~ LOGIN error", *bkd.out_hostport, err)
 		return nil, err
 	}
-	bkd.logger("<- LOGIN success", *bkd.out_hostport)
+	bkd.logger("\t<~ LOGIN success", *bkd.out_hostport)
 	s.upstream = c
 	s.verbose = *bkd.verbose // pass logging flag into session
 
@@ -97,18 +97,18 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 		ServerName:         host,
 	}
 	if err = c.StartTLS(tlsconfig); err != nil {
-		bkd.logger("-> STARTTLS error", err)
+		bkd.logger("\t<~ STARTTLS error", err)
 		return nil, err
 	}
-	bkd.logger("-> STARTTLS success")
+	bkd.logger("\t<~ STARTTLS success")
 
 	// Authenticate towards upstream host. If rejected, then pass error back to client
 	auth := sasl.NewPlainClient("", username, password)
 	if err := c.Auth(auth); err != nil {
-		bkd.logger("<~ AUTH error", err)
+		bkd.logger("\t<~ AUTH error", err)
 		return nil, errToSmtpErr(err)
 	}
-	bkd.logger("<~ AUTH success")
+	bkd.logger("\t<~ AUTH success")
 	return &s, nil
 }
 
@@ -134,22 +134,22 @@ func (s *Session) logger(args ...interface{}) {
 func (s *Session) Mail(from string) error {
 	s.logger("~> MAIL FROM", from)
 	if err := s.upstream.Mail(from); err != nil {
-		s.logger("<~ MAIL FROM error", err)
+		s.logger("\t<~ MAIL FROM error", err)
 		return errToSmtpErr(err)
 	}
 	s.mailfrom = from
-	s.logger("<~ MAIL FROM accepted")
+	s.logger("\t<~ MAIL FROM accepted")
 	return nil
 }
 
 func (s *Session) Rcpt(to string) error {
 	s.logger("~> RCPT TO", to)
 	if err := s.upstream.Rcpt(to); err != nil {
-		s.logger("<~ RCPT TO error", err)
+		s.logger("\t<~ RCPT TO error", err)
 		return errToSmtpErr(err)
 	}
 	s.rcptto = append(s.rcptto, to)
-	s.logger("<~ RCPT TO accepted")
+	s.logger("\t<~ RCPT TO accepted")
 	return nil
 }
 
@@ -157,20 +157,20 @@ func (s *Session) Data(r io.Reader) error {
 	s.logger("~> DATA")
 	w, err := s.upstream.Data()
 	if err != nil {
-		s.logger("<~ DATA error", err)
+		s.logger("\t<~ DATA error", err)
 		return err
 	}
 	_, err = io.Copy(w, r)
 	if err != nil {
-		s.logger("<~ DATA io.Copy error", err)
+		s.logger("\t<~ DATA io.Copy error", err)
 		return err
 	}
 	err = w.Close()
 	if err != nil {
-		s.logger("<~ DATA Close error", err)
+		s.logger("\t<~ DATA Close error", err)
 		return errToSmtpErr(err)
 	}
-	s.logger("<~ DATA accepted")
+	s.logger("\t<~ DATA accepted")
 	return nil
 }
 
@@ -184,10 +184,10 @@ func (s *Session) Logout() error {
 	if s.upstream != nil {
 		s.logger("~> QUIT")
 		if err := s.upstream.Quit(); err != nil {
-			s.logger("<~ QUIT error", err)
+			s.logger("\t<~ QUIT error", err)
 			return errToSmtpErr(err)
 		}
-		s.logger("<~ QUIT success")
+		s.logger("\t<~ QUIT success")
 		s.upstream = nil
 	}
 	s.mailfrom = ""
@@ -240,9 +240,12 @@ func main() {
 	s.WriteTimeout = 60 * time.Second
 	s.AllowInsecureAuth = true
 	s.TLSConfig = config
-	s.Verbose = *be.verbose
+	s.Verbose = false // Enable this for low-level console trace from the conn.go module
 
 	log.Println("Server AUTH capabilities", s.Auths())
+	log.Println("Backend logging", *be.verbose)
+	log.Println("Connection logging", s.Verbose)
+
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
