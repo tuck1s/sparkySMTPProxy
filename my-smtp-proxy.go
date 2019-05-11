@@ -79,7 +79,7 @@ func errToSmtpErr(e error) *smtp.SMTPError {
 // Login handles a login command with username and password.
 func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
 	var s Session
-	bkd.logger("-> LOGIN from", state.Hostname, state.RemoteAddr)
+	bkd.logger("-> LOGIN from", state.Hostname, state.RemoteAddr, username, password)
 
 	c, err := smtp.Dial(*bkd.out_hostport)
 	if err != nil {
@@ -216,12 +216,13 @@ func main() {
 		return
 	}
 	config := &tls.Config{Certificates: []tls.Certificate{cer}}
-	cert, err := x509.ParseCertificate(cer.Certificate[0])
+
+	leafCert, err := x509.ParseCertificate(cer.Certificate[0])
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	subjectDN := cert.Subject.ToRDNSequence().String()
+	subjectDN := leafCert.Subject.ToRDNSequence().String()
 	subject := strings.Split(subjectDN, "=")[1]
 	log.Println("Gathered certificate", *certfile, "and key", *privkeyfile)
 	log.Println("Incoming server name will advertise as", subject)
@@ -237,8 +238,9 @@ func main() {
 	s.Domain = subject
 	s.ReadTimeout = 60 * time.Second
 	s.WriteTimeout = 60 * time.Second
-	s.AllowInsecureAuth = false
+	s.AllowInsecureAuth = true
 	s.TLSConfig = config
+	s.Verbose = *be.verbose
 
 	log.Println("Server AUTH capabilities", s.Auths())
 	if err := s.ListenAndServe(); err != nil {
