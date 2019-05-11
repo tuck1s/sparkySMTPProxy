@@ -79,7 +79,7 @@ func errToSmtpErr(e error) *smtp.SMTPError {
 // Login handles a login command with username and password.
 func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
 	var s Session
-	bkd.logger("~> LOGIN from", state.Hostname, state.RemoteAddr, username, password)
+	bkd.logger("~> LOGIN from", state.Hostname, state.RemoteAddr)
 
 	c, err := smtp.Dial(*bkd.out_hostport)
 	if err != nil {
