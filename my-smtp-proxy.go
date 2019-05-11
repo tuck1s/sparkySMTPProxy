@@ -237,9 +237,10 @@ func main() {
 	s.Domain = subject
 	s.ReadTimeout = 60 * time.Second
 	s.WriteTimeout = 60 * time.Second
-	s.AllowInsecureAuth = true
+	s.AllowInsecureAuth = false
 	s.TLSConfig = config
 
+	log.Println("Server AUTH capabilities", s.Auths())
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
