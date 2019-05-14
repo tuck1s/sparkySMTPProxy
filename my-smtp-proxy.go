@@ -4,7 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
-	"github.com/emersion/go-sasl"
+	"github.com/tuck1s/go-sasl"
 	"github.com/tuck1s/go-smtp"
 	"io"
 	"log"
@@ -195,8 +195,8 @@ func (s *Session) Logout() error {
 	return nil
 }
 
-//TODO: More transparency on the MAIL, RCPT, DATA, QUIT "ok" responses (not available from smtp-go lib atm)
-//DATA, AUTH with error passes through now
+// TODO: lib is not fully transparent to extended error codes on the MAIL, RCPT, QUIT "ok" responses
+// DATA, AUTH responses with extended errors pass through now
 
 func main() {
 	in_hostport := flag.String("in_hostport", "localhost:587", "Port number to serve incoming SMTP requests")
