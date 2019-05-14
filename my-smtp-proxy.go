@@ -240,11 +240,8 @@ func main() {
 	s.WriteTimeout = 60 * time.Second
 	s.AllowInsecureAuth = true
 	s.TLSConfig = config
-	s.Verbose = false // Enable this for low-level console trace from the conn.go module
 
-	log.Println("Server AUTH capabilities", s.Auths())
 	log.Println("Backend logging", *be.verbose)
-	log.Println("Connection logging", s.Verbose)
 
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal(err)
