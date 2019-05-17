@@ -4,8 +4,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
-	"github.com/tuck1s/go-sasl"
-	"github.com/tuck1s/go-smtp"
+	"github.com/emersion/go-sasl"
+	"github.com/emersion/go-smtp"
 	"io"
 	"log"
 	"net"
@@ -240,6 +240,19 @@ func main() {
 	s.WriteTimeout = 60 * time.Second
 	s.AllowInsecureAuth = true
 	s.TLSConfig = config
+
+	// Add LOGIN auth method as not available by default, and Windows Send-MailMessage client requires it
+	s.EnableAuth(sasl.Login, func(conn *smtp.Conn) sasl.Server {
+		return sasl.NewLoginServer(func(username, password string) error {
+			state := conn.State()
+			session, err := be.Login(&state, username, password)
+			if err != nil {
+				return err
+			}
+			conn.SetSession(session)
+			return nil
+		})
+	})
 
 	log.Println("Backend logging", *be.verbose)
 
