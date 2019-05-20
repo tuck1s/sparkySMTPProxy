@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/textproto"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -174,9 +175,8 @@ func (s *Session) Data(r io.Reader) error {
 	return nil
 }
 
+// No action required
 func (s *Session) Reset() {
-	s.logger("~> RESET")
-	_ = s.Logout()
 }
 
 func (s *Session) Logout() error {
@@ -195,15 +195,13 @@ func (s *Session) Logout() error {
 	return nil
 }
 
-// TODO: lib is not fully transparent to extended error codes on the MAIL, RCPT, QUIT "ok" responses
-// DATA, AUTH responses with extended errors pass through now
-
 func main() {
 	in_hostport := flag.String("in_hostport", "localhost:587", "Port number to serve incoming SMTP requests")
 	out_hostport := flag.String("out_hostport", "smtp.sparkpostmail.com:587", "host:port for onward routing of SMTP requests")
 	verboseOpt := flag.Bool("verbose", false, "print out lots of messages")
 	certfile := flag.String("certfile", "fullchain.pem", "Certificate file for this server")
 	privkeyfile := flag.String("privkeyfile", "privkey.pem", "Private key file for this server")
+	serverDebug := flag.String("server_debug", "", "File to write server SMTP conversation for debugging")
 	flag.Parse()
 
 	log.Println("Incoming host:port set to", *in_hostport)
@@ -232,14 +230,26 @@ func main() {
 		out_hostport: out_hostport,
 		verbose:      verboseOpt,
 	}
-	s := smtp.NewServer(be)
+	log.Println("Backend logging", *be.verbose)
 
+	s := smtp.NewServer(be)
 	s.Addr = *in_hostport
 	s.Domain = subject
 	s.ReadTimeout = 60 * time.Second
 	s.WriteTimeout = 60 * time.Second
 	s.AllowInsecureAuth = true
 	s.TLSConfig = config
+	if *serverDebug != "" {
+		dbgFile, err := os.OpenFile(*serverDebug, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Println(err)
+			os.Exit(1)
+		}
+		defer dbgFile.Close()
+		s.Debug = dbgFile
+		log.Println("Server logging SMTP commands and responses to", dbgFile.Name())
+
+	}
 
 	// Add LOGIN auth method as not available by default, and Windows Send-MailMessage client requires it
 	s.EnableAuth(sasl.Login, func(conn *smtp.Conn) sasl.Server {
@@ -253,8 +263,6 @@ func main() {
 			return nil
 		})
 	})
-
-	log.Println("Backend logging", *be.verbose)
 
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal(err)
