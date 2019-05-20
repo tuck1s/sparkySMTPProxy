@@ -4,11 +4,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
+	"fmt"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"io"
 	"log"
 	"net"
+	"net/mail"
 	"net/textproto"
 	"os"
 	"strconv"
@@ -20,6 +22,7 @@ import (
 type Backend struct {
 	out_hostport *string
 	verbose      *bool
+	archiveEmail *mail.Address
 }
 
 func (bkd *Backend) logger(args ...interface{}) {
@@ -80,6 +83,7 @@ func errToSmtpErr(e error) *smtp.SMTPError {
 // Login handles a login command with username and password.
 func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
 	var s Session
+	s.bkd = bkd
 	bkd.logger("~> LOGIN from", state.Hostname, state.RemoteAddr)
 
 	c, err := smtp.Dial(*bkd.out_hostport)
@@ -89,7 +93,6 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 	}
 	bkd.logger("\t<~ LOGIN success", *bkd.out_hostport)
 	s.upstream = c
-	s.verbose = *bkd.verbose // pass logging flag into session
 
 	// STARTTLS on upstream host, checking its cert is also valid
 	host, _, _ := net.SplitHostPort(*bkd.out_hostport)
@@ -124,54 +127,56 @@ type Session struct {
 	mailfrom string
 	rcptto   []string // Can have more than one recipient
 	upstream *smtp.Client
-	verbose  bool
+	bkd      *Backend // The backend that created this session
 }
 
-func (s *Session) logger(args ...interface{}) {
-	if s.verbose {
-		log.Println(args)
-	}
-}
 func (s *Session) Mail(from string) error {
-	s.logger("~> MAIL FROM", from)
+	s.bkd.logger("~> MAIL FROM", from)
 	if err := s.upstream.Mail(from); err != nil {
-		s.logger("\t<~ MAIL FROM error", err)
+		s.bkd.logger("\t<~ MAIL FROM error", err)
 		return errToSmtpErr(err)
 	}
 	s.mailfrom = from
-	s.logger("\t<~ MAIL FROM accepted")
+	s.bkd.logger("\t<~ MAIL FROM accepted")
 	return nil
 }
 
 func (s *Session) Rcpt(to string) error {
-	s.logger("~> RCPT TO", to)
+	s.bkd.logger("~> RCPT TO", to)
 	if err := s.upstream.Rcpt(to); err != nil {
-		s.logger("\t<~ RCPT TO error", err)
+		s.bkd.logger("\t<~ RCPT TO error", err)
 		return errToSmtpErr(err)
 	}
 	s.rcptto = append(s.rcptto, to)
-	s.logger("\t<~ RCPT TO accepted")
+	s.bkd.logger("\t<~ RCPT TO accepted")
 	return nil
 }
 
 func (s *Session) Data(r io.Reader) error {
-	s.logger("~> DATA")
+	s.bkd.logger("~> DATA")
 	w, err := s.upstream.Data()
 	if err != nil {
-		s.logger("\t<~ DATA error", err)
+		s.bkd.logger("\t<~ DATA error", err)
 		return err
 	}
+
+	// Build SparkPost header value for archival - see https://developers.sparkpost.com/api/smtp/
+	arch := fmt.Sprintf("X-MSYS-API: {\"archive\":[{\"email\":\"%s\",\"name\":\"%s\"}]}\n",
+		s.bkd.archiveEmail.Address, s.bkd.archiveEmail.Name)
+	_, err = io.WriteString(w, arch)
+
 	_, err = io.Copy(w, r)
 	if err != nil {
-		s.logger("\t<~ DATA io.Copy error", err)
+		s.bkd.logger("\t<~ DATA io.Copy error", err)
 		return err
 	}
 	err = w.Close()
 	if err != nil {
-		s.logger("\t<~ DATA Close error", err)
+		s.bkd.logger("\t<~ DATA Close error", err)
 		return errToSmtpErr(err)
 	}
-	s.logger("\t<~ DATA accepted")
+	s.bkd.logger("\t<~ DATA accepted")
+
 	return nil
 }
 
@@ -182,12 +187,12 @@ func (s *Session) Reset() {
 func (s *Session) Logout() error {
 	// Close the upstream connection gracefully, if it's open
 	if s.upstream != nil {
-		s.logger("~> QUIT")
+		s.bkd.logger("~> QUIT")
 		if err := s.upstream.Quit(); err != nil {
-			s.logger("\t<~ QUIT error", err)
+			s.bkd.logger("\t<~ QUIT error", err)
 			return errToSmtpErr(err)
 		}
-		s.logger("\t<~ QUIT success")
+		s.bkd.logger("\t<~ QUIT success")
 		s.upstream = nil
 	}
 	s.mailfrom = ""
@@ -202,6 +207,7 @@ func main() {
 	certfile := flag.String("certfile", "fullchain.pem", "Certificate file for this server")
 	privkeyfile := flag.String("privkeyfile", "privkey.pem", "Private key file for this server")
 	serverDebug := flag.String("server_debug", "", "File to write server SMTP conversation for debugging")
+	archiveEmail := flag.String("archive_email", "", "Email address to archive a blind copy to (SparkPost only)")
 	flag.Parse()
 
 	log.Println("Incoming host:port set to", *in_hostport)
@@ -210,27 +216,36 @@ func main() {
 	// Gather TLS credentials from filesystem, use these with the server and also set the EHLO server name
 	cer, err := tls.LoadX509KeyPair(*certfile, *privkeyfile)
 	if err != nil {
-		log.Println(err)
-		return
+		log.Fatal(err)
 	}
 	config := &tls.Config{Certificates: []tls.Certificate{cer}}
 
 	leafCert, err := x509.ParseCertificate(cer.Certificate[0])
 	if err != nil {
-		log.Println(err)
-		return
+		log.Fatal(err)
 	}
 	subjectDN := leafCert.Subject.ToRDNSequence().String()
 	subject := strings.Split(subjectDN, "=")[1]
 	log.Println("Gathered certificate", *certfile, "and key", *privkeyfile)
 	log.Println("Incoming server name will advertise as", subject)
 
+	// Check if blind-copy archive is required and if so, check for valid email address
+	arch := &mail.Address{"", ""}
+	if *archiveEmail != "" {
+		arch, err = mail.ParseAddress(*archiveEmail)
+		if err != nil {
+			log.Fatal("Archive", err)
+		}
+	}
+
 	// Set up parameters that the backend will use
 	be := &Backend{
 		out_hostport: out_hostport,
 		verbose:      verboseOpt,
+		archiveEmail: arch,
 	}
 	log.Println("Backend logging", *be.verbose)
+	log.Println("Archive email copy sent to: ", be.archiveEmail.String())
 
 	s := smtp.NewServer(be)
 	s.Addr = *in_hostport
@@ -242,13 +257,11 @@ func main() {
 	if *serverDebug != "" {
 		dbgFile, err := os.OpenFile(*serverDebug, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			log.Println(err)
-			os.Exit(1)
+			log.Fatal(err)
 		}
 		defer dbgFile.Close()
 		s.Debug = dbgFile
 		log.Println("Server logging SMTP commands and responses to", dbgFile.Name())
-
 	}
 
 	// Add LOGIN auth method as not available by default, and Windows Send-MailMessage client requires it
