@@ -18,13 +18,13 @@ import (
 
 // The Backend implements SMTP server methods.
 type Backend struct {
-	out_hostport string
-	verbose      bool
+	outHostPort string
+	verbose     bool
 }
 
 func (bkd *Backend) logger(args ...interface{}) {
 	if bkd.verbose {
-		log.Println(args)
+		log.Println(args...)
 	}
 }
 
@@ -54,7 +54,7 @@ func makeEnhancedCode(c0, c1, c2 byte) smtp.EnhancedCode {
 }
 
 // Check and convert error to SMTPError type, which includes an enhanced code attribute
-func errToSmtpErr(e error) *smtp.SMTPError {
+func errToSMTPErr(e error) *smtp.SMTPError {
 	if smtpErr, ok := e.(*smtp.SMTPError); ok {
 		return smtpErr
 	}
@@ -86,12 +86,12 @@ func errToSmtpErr(e error) *smtp.SMTPError {
 // Init the backend. Here we establish the upstream connection
 func (bkd *Backend) Init() (smtp.Session, error) {
 	var s Session
-	c, err := smtp.Dial(bkd.out_hostport)
+	c, err := smtp.Dial(bkd.outHostPort)
 	if err != nil {
-		bkd.logger("\t<~ Connection error", bkd.out_hostport, err)
+		bkd.logger("\t<~ Connection error", bkd.outHostPort, err)
 		return &s, err
 	}
-	bkd.logger("\t<~ Connection success", bkd.out_hostport)
+	bkd.logger("\t<~ Connection success", bkd.outHostPort)
 	s.bkd = bkd    // just for logging
 	s.upstream = c // keep record of the upstream Client connection
 	return &s, nil
@@ -100,7 +100,7 @@ func (bkd *Backend) Init() (smtp.Session, error) {
 // Greet the upstream host and report capabilities back.
 func (s *Session) Greet(helotype string) ([]string, error) {
 	s.bkd.logger("~>", helotype)
-	host, _, _ := net.SplitHostPort(s.bkd.out_hostport)
+	host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
 	if err := s.upstream.Hello(host); err == nil {
 		s.bkd.logger("\t<~", helotype, "success")
 	} else {
@@ -112,7 +112,7 @@ func (s *Session) Greet(helotype string) ([]string, error) {
 	return caps, nil
 }
 
-// Contains tells whether a contains x.
+// Contains tells whether a contains x
 func Contains(a []string, x string) bool {
 	for _, n := range a {
 		if x == n {
@@ -128,7 +128,7 @@ func (s *Session) StartTLS() error {
 	if _, isTLS := c.TLSConnectionState(); !isTLS {
 		// STARTTLS on upstream host, if it is not already running, and has the capability, checking its cert is also valid
 		fmt.Println("current connection - isTLS =", isTLS)
-		host, _, _ := net.SplitHostPort(s.bkd.out_hostport)
+		host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
 
 		if Contains(c.Capabilities(), "STARTTLS") {
 			tlsconfig := &tls.Config{
@@ -159,7 +159,7 @@ func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error)
 	return code, msg, err
 }
 
-// Data command - pass upstream. Handle this in two phases so we can be transparent with codes
+// DataCommand pass through. Handle this in two phases so we can be transparent with codes
 func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 	s.bkd.logger("~> DATA")
 	w, code, msg, err := s.upstream.Data()
@@ -169,21 +169,22 @@ func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 	return w, code, msg, err
 }
 
-// Pass Data body (dot delimited)
-func (s *Session) Data(r io.Reader, w io.WriteCloser) error {
+// Data body pass through (dot delimited)
+func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
 	_, err := io.Copy(w, r)
 	if err != nil {
 		s.bkd.logger("\t<~ DATA io.Copy error", err)
-		return err
+		return 0, "DATA io.Copy error", err
 	}
 	err = w.Close()
+	code := s.upstream.DataResponseCode
+	msg := s.upstream.DataResponseMsg
 	if err != nil {
 		s.bkd.logger("\t<~ DATA Close error", err)
-		return errToSmtpErr(err)
+	} else {
+		s.bkd.logger("\t<~ DATA accepted")
 	}
-	s.bkd.logger("\t<~ DATA accepted")
-
-	return nil
+	return code, msg, err
 }
 
 // Reset - no action required
@@ -222,8 +223,8 @@ func main() {
 
 	// Set up parameters that the backend will use
 	be := &Backend{
-		out_hostport: *out_hostport,
-		verbose:      *verboseOpt,
+		outHostPort: *out_hostport,
+		verbose:     *verboseOpt,
 	}
 	log.Println("Backend logging", be.verbose)
 

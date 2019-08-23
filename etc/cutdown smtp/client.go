@@ -6,15 +6,11 @@ package smtp
 
 import (
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/textproto"
 	"strings"
-
-	"github.com/emersion/go-sasl"
 )
 
 // A Client represents a client connection to an SMTP server.
@@ -37,6 +33,10 @@ type Client struct {
 	didHello    bool   // whether we've said HELO/EHLO/LHLO
 	helloError  error  // the error from the hello
 	rcptToCount int    // number of recipients
+
+	// SMT 2019-08-23 extensions - admittedly tramp data until I figure out writeCloser class better
+	DataResponseCode int
+	DataResponseMsg  string
 }
 
 // Dial returns a new Client connected to an SMTP server at addr.
@@ -237,56 +237,6 @@ func (c *Client) Verify(addr string) error {
 	return err
 }
 
-// Auth authenticates a client using the provided authentication mechanism.
-// A failed authentication closes the connection.
-// Only servers that advertise the AUTH extension support this function.
-func (c *Client) Auth(a sasl.Client) error {
-	if err := c.hello(); err != nil {
-		return err
-	}
-	encoding := base64.StdEncoding
-	mech, resp, err := a.Start()
-	if err != nil {
-		c.Quit()
-		return err
-	}
-	resp64 := make([]byte, encoding.EncodedLen(len(resp)))
-	encoding.Encode(resp64, resp)
-	code, msg64, err := c.cmd(0, strings.TrimSpace(fmt.Sprintf("AUTH %s %s", mech, resp64)))
-	for err == nil {
-		var msg []byte
-		switch code {
-		case 334:
-			msg, err = encoding.DecodeString(msg64)
-		case 235:
-			// the last message isn't base64 because it isn't a challenge
-			msg = []byte(msg64)
-		default:
-			err = &textproto.Error{Code: code, Msg: msg64}
-		}
-		if err == nil {
-			if code == 334 {
-				resp, err = a.Next(msg)
-			} else {
-				resp = nil
-			}
-		}
-		if err != nil {
-			// abort the AUTH
-			c.cmd(501, "*")
-			c.Quit()
-			break
-		}
-		if resp == nil {
-			break
-		}
-		resp64 = make([]byte, encoding.EncodedLen(len(resp)))
-		encoding.Encode(resp64, resp)
-		code, msg64, err = c.cmd(0, string(resp64))
-	}
-	return err
-}
-
 // Mail issues a MAIL command to the server using the provided email address.
 // If the server supports the 8BITMIME extension, Mail adds the BODY=8BITMIME
 // parameter.
@@ -327,20 +277,15 @@ type dataCloser struct {
 	io.WriteCloser
 }
 
+// Data closer
+// Conforms to the WriteCloser spec (returning only error)
 func (d *dataCloser) Close() error {
 	d.WriteCloser.Close()
-	if d.c.lmtp {
-		for d.c.rcptToCount > 0 {
-			if _, _, err := d.c.Text.ReadResponse(250); err != nil {
-				return err
-			}
-			d.c.rcptToCount--
-		}
-		return nil
-	} else {
-		_, _, err := d.c.Text.ReadResponse(250)
-		return err
-	}
+	// Pass the extended response info back via Client structure.
+	code, msg, err := d.c.Text.ReadResponse(250)
+	d.c.DataResponseCode = code
+	d.c.DataResponseMsg = msg
+	return err
 }
 
 // Data issues a DATA command to the server and returns a writer that
@@ -356,79 +301,6 @@ func (c *Client) Data() (io.WriteCloser, int, string, error) {
 }
 
 var testHookStartTLS func(*tls.Config) // nil, except for tests
-
-// SendMail connects to the server at addr, switches to TLS if
-// possible, authenticates with the optional mechanism a if possible,
-// and then sends an email from address from, to addresses to, with
-// message r.
-// The addr must include a port, as in "mail.example.com:smtp".
-//
-// The addresses in the to parameter are the SMTP RCPT addresses.
-//
-// The r parameter should be an RFC 822-style email with headers
-// first, a blank line, and then the message body. The lines of r
-// should be CRLF terminated. The r headers should usually include
-// fields such as "From", "To", "Subject", and "Cc".  Sending "Bcc"
-// messages is accomplished by including an email address in the to
-// parameter but not including it in the r headers.
-//
-// The SendMail function and the net/smtp package are low-level
-// mechanisms and provide no support for DKIM signing, MIME
-// attachments (see the mime/multipart package), or other mail
-// functionality. Higher-level packages exist outside of the standard
-// library.
-func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader) error {
-	if err := validateLine(from); err != nil {
-		return err
-	}
-	for _, recp := range to {
-		if err := validateLine(recp); err != nil {
-			return err
-		}
-	}
-	c, err := Dial(addr)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-	if err = c.hello(); err != nil {
-		return err
-	}
-	if ok, _ := c.Extension("STARTTLS"); ok {
-		if err = c.StartTLS(nil); err != nil {
-			return err
-		}
-	}
-	if a != nil && c.ext != nil {
-		if _, ok := c.ext["AUTH"]; !ok {
-			return errors.New("smtp: server doesn't support AUTH")
-		}
-		if err = c.Auth(a); err != nil {
-			return err
-		}
-	}
-	if err = c.Mail(from); err != nil {
-		return err
-	}
-	for _, addr := range to {
-		if err = c.Rcpt(addr); err != nil {
-			return err
-		}
-	}
-	w, _, _, err := c.Data()
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(w, r)
-	if err != nil {
-		return err
-	}
-	err = w.Close()
-	if err != nil {
-		return err
-	}
-	return c.Quit()
-}
 
 // Extension reports whether an extension is support by the server.
 // The extension name is case-insensitive. If the extension is supported,

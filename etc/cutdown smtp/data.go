@@ -4,6 +4,7 @@ import (
 	"io"
 )
 
+// EnhancedCode as per https://tools.ietf.org/html/rfc3463
 type EnhancedCode [3]int
 
 // SMTPError specifies the error code and message that needs to be returned to the client

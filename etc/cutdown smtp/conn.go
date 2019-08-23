@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// ConnectionState gives useful info about the incoming connection, including the TLS status
 type ConnectionState struct {
 	Hostname   string
 	LocalAddr  net.Addr
@@ -20,6 +21,7 @@ type ConnectionState struct {
 	TLS        tls.ConnectionState
 }
 
+// Conn is the incoming connection
 type Conn struct {
 	conn      net.Conn
 	text      *textproto.Conn
@@ -108,23 +110,26 @@ func (c *Conn) handle(cmd string, arg string) {
 	}
 }
 
+// Server name of this connection
 func (c *Conn) Server() *Server {
 	return c.server
 }
 
+// Session associated with this connection
 func (c *Conn) Session() Session {
 	c.locker.Lock()
 	defer c.locker.Unlock()
 	return c.session
 }
 
-// Setting the user resets any message being generated
+// SetSession - setting the user resets any message being generated
 func (c *Conn) SetSession(session Session) {
 	c.locker.Lock()
 	defer c.locker.Unlock()
 	c.session = session
 }
 
+// Close this connection
 func (c *Conn) Close() error {
 	return c.conn.Close()
 }
@@ -139,6 +144,7 @@ func (c *Conn) TLSConnectionState() (state tls.ConnectionState, ok bool) {
 	return tc.ConnectionState(), true
 }
 
+// State of this connection
 func (c *Conn) State() ConnectionState {
 	state := ConnectionState{}
 	tlsState, ok := c.TLSConnectionState()
@@ -256,35 +262,16 @@ func (c *Conn) handleStartTLS() {
 
 //-----------------------------------------------------------------------------
 
-// DATA
+// DATA transparent handler. Note we don't need to check err responses as code, msg carries it
 func (c *Conn) handleData(arg string) {
-	var enhancedCode EnhancedCode
-	w, code, msg, err := c.Session().DataCommand()
-	//FIXME: transarent enhanced code
-	c.WriteResponse(code, EnhancedCode{2, 0, 0}, msg)
+	w, code, msg, _ := c.Session().DataCommand()
+	// Enhanced code is at the beginning of msg, no need to add anything
+	c.WriteResponse(code, NoEnhancedCode, msg)
 
 	r := newDataReader(c)
-	err = c.Session().Data(r, w)
-	io.Copy(ioutil.Discard, r) // Make sure all the data has been consumed
-
-	//FIXME: transarent enhanced code
-	if err != nil {
-		if smtperr, ok := err.(*SMTPError); ok {
-			code = smtperr.Code
-			enhancedCode = smtperr.EnhancedCode
-			msg = smtperr.Message
-		} else {
-			code = 554
-			enhancedCode = EnhancedCode{5, 0, 0}
-			msg = "Error: transaction failed, blame it on the weather: " + err.Error()
-		}
-	} else {
-		code = 250
-		enhancedCode = EnhancedCode{2, 0, 0}
-		msg = "OK: queued"
-	}
-
-	c.WriteResponse(code, enhancedCode, msg)
+	code, msg, _ = c.Session().Data(r, w)
+	io.Copy(ioutil.Discard, r) // Make sure all the incoming data has been consumed
+	c.WriteResponse(code, NoEnhancedCode, msg)
 	c.reset()
 }
 
@@ -292,6 +279,8 @@ func (c *Conn) greet() {
 	c.WriteResponse(220, NoEnhancedCode, fmt.Sprintf("%v ESMTP Service Ready", c.server.Domain))
 }
 
+// WriteResponse back to the incoming connection.
+// If you do not want an enhanced code added, pass in value NoEnhancedCode.
 func (c *Conn) WriteResponse(code int, enhCode EnhancedCode, text ...string) {
 	// TODO: error handling
 	if c.server.WriteTimeout != 0 {
@@ -320,7 +309,7 @@ func (c *Conn) WriteResponse(code int, enhCode EnhancedCode, text ...string) {
 	}
 }
 
-// Reads a line of input
+// ReadLine reads a line of input from the incoming connection
 func (c *Conn) ReadLine() (string, error) {
 	if c.server.ReadTimeout != 0 {
 		if err := c.conn.SetReadDeadline(time.Now().Add(c.server.ReadTimeout)); err != nil {

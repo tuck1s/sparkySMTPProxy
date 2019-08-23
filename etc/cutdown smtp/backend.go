@@ -1,13 +1,7 @@
 package smtp
 
 import (
-	"errors"
 	"io"
-)
-
-var (
-	ErrAuthRequired    = errors.New("Please authenticate first")
-	ErrAuthUnsupported = errors.New("Authentication not supported")
 )
 
 // Backend for a SMTP server
@@ -16,6 +10,7 @@ type Backend interface {
 	Init() (Session, error)
 }
 
+// Session backend functions
 type Session interface {
 	// Greet a session. Returns capabilities of the upstream host
 	Greet(ehlotype string) ([]string, error)
@@ -30,7 +25,7 @@ type Session interface {
 	DataCommand() (w io.WriteCloser, code int, msg string, err error)
 
 	// Pass Data body (dot delimited)
-	Data(r io.Reader, w io.WriteCloser) error
+	Data(r io.Reader, w io.WriteCloser) (int, string, error)
 
 	// Pass a command directly through to the backend
 	Passthru(expectcode int, cmd, arg string) (int, string, error)

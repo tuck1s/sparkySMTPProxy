@@ -9,14 +9,9 @@ import (
 	"os"
 	"sync"
 	"time"
-
-	"github.com/emersion/go-sasl"
 )
 
 var errTCPAndLMTP = errors.New("smtp: cannot start LMTP server listening on a TCP socket")
-
-// A function that creates SASL servers.
-type SaslServerFactory func(conn *Conn) sasl.Server
 
 // Logger interface is used by Server to report unexpected internal errors.
 type Logger interface {
@@ -24,7 +19,7 @@ type Logger interface {
 	Println(v ...interface{})
 }
 
-// A SMTP server.
+// Server is an SMTP server.
 type Server struct {
 	// TCP or Unix address to listen on.
 	Addr string
@@ -47,19 +42,19 @@ type Server struct {
 
 	listener net.Listener
 	caps     []string
-	auths    map[string]SaslServerFactory
+
+	//auths no longer using sasl library
 
 	locker sync.Mutex
 	conns  map[*Conn]struct{}
 }
 
-// New creates a new SMTP server.
+// NewServer creates a new SMTP server, with a Backend interface, supporting many connections
 func NewServer(be Backend) *Server {
 	return &Server{
 		Backend:  be,
 		ErrorLog: log.New(os.Stderr, "smtp/server ", log.LstdFlags),
 		caps:     []string{"PIPELINING", "8BITMIME", "ENHANCEDSTATUSCODES"},
-		auths:    map[string]SaslServerFactory{},
 		conns:    make(map[*Conn]struct{}),
 	}
 }
@@ -79,6 +74,7 @@ func (s *Server) Serve(l net.Listener) error {
 	}
 }
 
+// handleConn handles incoming SMTP connections
 func (s *Server) handleConn(c *Conn) error {
 	s.locker.Lock()
 	s.conns[c] = struct{}{}
@@ -154,14 +150,6 @@ func (s *Server) Close() {
 	for conn := range s.conns {
 		conn.Close()
 	}
-}
-
-// EnableAuth enables an authentication mechanism on this server.
-//
-// This function should not be called directly, it must only be used by
-// libraries implementing extensions of the SMTP protocol.
-func (s *Server) EnableAuth(name string, f SaslServerFactory) {
-	s.auths[name] = f
 }
 
 // ForEachConn iterates through all opened connections.
