@@ -3,8 +3,8 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -31,8 +31,9 @@ func Contains(a []string, x string) bool {
 
 // The Backend implements SMTP server methods.
 type Backend struct {
-	outHostPort string
-	verbose     bool
+	outHostPort        string
+	verbose            bool
+	requireUpstreamTLS bool
 }
 
 func (bkd *Backend) logger(args ...interface{}) {
@@ -67,9 +68,10 @@ type Session struct {
 
 // Greet the upstream host and report capabilities back.
 func (s *Session) Greet(helotype string) ([]string, error) {
+	var err error
 	s.bkd.logger("~>", helotype)
 	host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
-	if err := s.upstream.Hello(host); err == nil {
+	if err = s.upstream.Hello(host); err == nil {
 		s.bkd.logger("\t<~", helotype, "success")
 	} else {
 		s.bkd.logger("\t<~", helotype, "error", err)
@@ -77,7 +79,15 @@ func (s *Session) Greet(helotype string) ([]string, error) {
 	}
 	caps := s.upstream.Capabilities()
 	s.bkd.logger("\tUpstream capabilities:", caps)
-	return caps, nil
+	if _, isTLS := s.upstream.TLSConnectionState(); !isTLS && s.bkd.requireUpstreamTLS {
+		if Contains(caps, "STARTTLS") {
+			s.bkd.logger("Info: requesting immediate upstream STARTTLS")
+			err = s.StartTLS()
+		} else {
+			err = errors.New("setting requires upstream STARTTLS, server doesn't support")
+		}
+	}
+	return caps, err
 }
 
 // StartTLS command
@@ -85,7 +95,6 @@ func (s *Session) StartTLS() error {
 	c := s.upstream
 	if _, isTLS := c.TLSConnectionState(); !isTLS {
 		// STARTTLS on upstream host, if it is not already running, and has the capability, checking its cert is also valid
-		fmt.Println("current connection - isTLS =", isTLS)
 		host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
 
 		if Contains(c.Capabilities(), "STARTTLS") {
@@ -185,6 +194,7 @@ func main() {
 	certfile := flag.String("certfile", "fullchain.pem", "Certificate file for this server")
 	privkeyfile := flag.String("privkeyfile", "privkey.pem", "Private key file for this server")
 	serverDebug := flag.String("server_debug", "", "File to write server SMTP conversation for debugging")
+	requireUpstreamTLS := flag.Bool("require_upstream_tls", false, "Force upstream server to TLS (raise error if it can't)")
 	flag.Parse()
 
 	log.Println("Incoming host:port set to", *inHostPort)
@@ -208,10 +218,12 @@ func main() {
 
 	// Set up parameters that the backend will use
 	be := &Backend{
-		outHostPort: *outHostPort,
-		verbose:     *verboseOpt,
+		outHostPort:        *outHostPort,
+		verbose:            *verboseOpt,
+		requireUpstreamTLS: *requireUpstreamTLS,
 	}
-	log.Println("Backend logging", be.verbose)
+	log.Println("Backend logging:", be.verbose)
+	log.Println("Require upstream server to support STARTTLS:", be.requireUpstreamTLS)
 
 	s := smtpproxy.NewServer(be)
 	s.Addr = *inHostPort
