@@ -15,6 +15,20 @@ import (
 	"github.com/tuck1s/go-smtpproxy"
 )
 
+// Contains tells whether a contains x
+func Contains(a []string, x string) bool {
+	for _, n := range a {
+		if x == n {
+			return true
+		}
+	}
+	return false
+}
+
+//-----------------------------------------------------------------------------
+// Backend handlers
+//-----------------------------------------------------------------------------
+
 // The Backend implements SMTP server methods.
 type Backend struct {
 	outHostPort string
@@ -25,12 +39,6 @@ func (bkd *Backend) logger(args ...interface{}) {
 	if bkd.verbose {
 		log.Println(args...)
 	}
-}
-
-// A Session is returned after successful login. Here hold information that needs to persist across message phases.
-type Session struct {
-	bkd      *Backend          // The backend that created this session. Allows session methods to e.g. log
-	upstream *smtpproxy.Client // the upstream client this backend is driving
 }
 
 // Init the backend. Here we establish the upstream connection
@@ -47,6 +55,16 @@ func (bkd *Backend) Init() (smtpproxy.Session, error) {
 	return &s, nil
 }
 
+//-----------------------------------------------------------------------------
+// Session handlers
+//-----------------------------------------------------------------------------
+
+// A Session is returned after successful login. Here hold information that needs to persist across message phases.
+type Session struct {
+	bkd      *Backend          // The backend that created this session. Allows session methods to e.g. log
+	upstream *smtpproxy.Client // the upstream client this backend is driving
+}
+
 // Greet the upstream host and report capabilities back.
 func (s *Session) Greet(helotype string) ([]string, error) {
 	s.bkd.logger("~>", helotype)
@@ -60,16 +78,6 @@ func (s *Session) Greet(helotype string) ([]string, error) {
 	caps := s.upstream.Capabilities()
 	s.bkd.logger("\tUpstream capabilities:", caps)
 	return caps, nil
-}
-
-// Contains tells whether a contains x
-func Contains(a []string, x string) bool {
-	for _, n := range a {
-		if x == n {
-			return true
-		}
-	}
-	return false
 }
 
 // StartTLS command
@@ -96,7 +104,37 @@ func (s *Session) StartTLS() error {
 	return nil
 }
 
-// Passthru command
+//Auth command backend handler
+func (s *Session) Auth(expectcode int, cmd, arg string) (int, string, error) {
+	return s.Passthru(expectcode, cmd, arg)
+}
+
+//Mail command backend handler
+func (s *Session) Mail(expectcode int, cmd, arg string) (int, string, error) {
+	return s.Passthru(expectcode, cmd, arg)
+}
+
+//Rcpt command backend handler
+func (s *Session) Rcpt(expectcode int, cmd, arg string) (int, string, error) {
+	return s.Passthru(expectcode, cmd, arg)
+}
+
+//Reset command backend handler
+func (s *Session) Reset(expectcode int, cmd, arg string) (int, string, error) {
+	return s.Passthru(expectcode, cmd, arg)
+}
+
+//Quit command backend handler
+func (s *Session) Quit(expectcode int, cmd, arg string) (int, string, error) {
+	return s.Passthru(expectcode, cmd, arg)
+}
+
+//Unknown command backend handler
+func (s *Session) Unknown(expectcode int, cmd, arg string) (int, string, error) {
+	return s.Passthru(expectcode, cmd, arg)
+}
+
+// Passthru a command to the upstream server, logging
 func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error) {
 	s.bkd.logger("~>", cmd, arg)
 	var joined string
@@ -110,7 +148,7 @@ func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error)
 	return code, msg, err
 }
 
-// DataCommand pass through. Handle this in two phases so we can be transparent with codes
+// DataCommand pass upstream, returning a place to write the data AND the usual responses
 func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 	s.bkd.logger("~> DATA")
 	w, code, msg, err := s.upstream.Data()
@@ -120,7 +158,7 @@ func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 	return w, code, msg, err
 }
 
-// Data body pass through (dot delimited)
+// Data body (dot delimited) pass upstream, returning the usual responses
 func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
 	_, err := io.Copy(w, r)
 	if err != nil {
@@ -136,10 +174,6 @@ func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
 		s.bkd.logger("\t<~ DATA accepted")
 	}
 	return code, msg, err
-}
-
-// Reset - no action required
-func (s *Session) Reset() {
 }
 
 //-----------------------------------------------------------------------------
