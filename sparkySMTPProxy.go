@@ -8,12 +8,11 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/textproto"
 	"os"
-	"smtp"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tuck1s/go-smtpproxy"
 )
 
 // The Backend implements SMTP server methods.
@@ -30,63 +29,14 @@ func (bkd *Backend) logger(args ...interface{}) {
 
 // A Session is returned after successful login. Here hold information that needs to persist across message phases.
 type Session struct {
-	bkd      *Backend     // The backend that created this session. Allows session methods to e.g. log
-	upstream *smtp.Client // the upstream client this backend is driving
-}
-
-func byteDigitToInt(c byte) (int, error) {
-	return strconv.Atoi(string(c))
-}
-
-// Make an EnhancedCode type out of three bytes
-func makeEnhancedCode(c0, c1, c2 byte) smtp.EnhancedCode {
-	d0, err0 := byteDigitToInt(c0)
-	d1, err1 := byteDigitToInt(c1)
-	d2, err2 := byteDigitToInt(c2)
-	if err0 == nil && err1 == nil && err2 == nil {
-		return smtp.EnhancedCode{
-			d0,
-			d1,
-			d2,
-		}
-	}
-	return smtp.EnhancedCodeNotSet
-}
-
-// Check and convert error to SMTPError type, which includes an enhanced code attribute
-func errToSMTPErr(e error) *smtp.SMTPError {
-	if smtpErr, ok := e.(*smtp.SMTPError); ok {
-		return smtpErr
-	}
-	if tp, ok := e.(*textproto.Error); ok {
-		// promote textproto.Error type
-		enh := smtp.EnhancedCodeNotSet
-		if len(tp.Msg) >= 6 {
-			s := tp.Msg[:6]
-			if s[1] == '.' && s[3] == '.' && s[5] == ' ' {
-				enh = makeEnhancedCode(s[0], s[2], s[4])
-				// remove enhanced code from front of string
-				tp.Msg = tp.Msg[6:]
-			}
-		}
-		return &smtp.SMTPError{
-			Code:         tp.Code,
-			EnhancedCode: enh,
-			Message:      tp.Msg,
-		}
-	}
-	// default - we just have text, placeholders for the rest
-	return &smtp.SMTPError{
-		Code:         0,
-		EnhancedCode: smtp.EnhancedCodeNotSet,
-		Message:      e.Error(),
-	}
+	bkd      *Backend          // The backend that created this session. Allows session methods to e.g. log
+	upstream *smtpproxy.Client // the upstream client this backend is driving
 }
 
 // Init the backend. Here we establish the upstream connection
-func (bkd *Backend) Init() (smtp.Session, error) {
+func (bkd *Backend) Init() (smtpproxy.Session, error) {
 	var s Session
-	c, err := smtp.Dial(bkd.outHostPort)
+	c, err := smtpproxy.Dial(bkd.outHostPort)
 	if err != nil {
 		bkd.logger("\t<~ Connection error", bkd.outHostPort, err)
 		return &s, err
@@ -156,6 +106,7 @@ func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error)
 		joined = cmd + " " + arg
 	}
 	code, msg, err := s.upstream.MyCmd(expectcode, joined)
+	s.bkd.logger("\t<~", code, msg)
 	return code, msg, err
 }
 
@@ -194,16 +145,16 @@ func (s *Session) Reset() {
 //-----------------------------------------------------------------------------
 
 func main() {
-	in_hostport := flag.String("in_hostport", "localhost:587", "Port number to serve incoming SMTP requests")
-	out_hostport := flag.String("out_hostport", "smtp.sparkpostmail.com:587", "host:port for onward routing of SMTP requests")
+	inHostPort := flag.String("in_hostport", "localhost:587", "Port number to serve incoming SMTP requests")
+	outHostPort := flag.String("out_hostport", "smtp.sparkpostmail.com:587", "host:port for onward routing of SMTP requests")
 	verboseOpt := flag.Bool("verbose", false, "print out lots of messages")
 	certfile := flag.String("certfile", "fullchain.pem", "Certificate file for this server")
 	privkeyfile := flag.String("privkeyfile", "privkey.pem", "Private key file for this server")
 	serverDebug := flag.String("server_debug", "", "File to write server SMTP conversation for debugging")
 	flag.Parse()
 
-	log.Println("Incoming host:port set to", *in_hostport)
-	log.Println("Outgoing host:port set to", *out_hostport)
+	log.Println("Incoming host:port set to", *inHostPort)
+	log.Println("Outgoing host:port set to", *outHostPort)
 
 	// Gather TLS credentials from filesystem, use these with the server and also set the EHLO server name
 	cer, err := tls.LoadX509KeyPair(*certfile, *privkeyfile)
@@ -223,13 +174,13 @@ func main() {
 
 	// Set up parameters that the backend will use
 	be := &Backend{
-		outHostPort: *out_hostport,
+		outHostPort: *outHostPort,
 		verbose:     *verboseOpt,
 	}
 	log.Println("Backend logging", be.verbose)
 
-	s := smtp.NewServer(be)
-	s.Addr = *in_hostport
+	s := smtpproxy.NewServer(be)
+	s.Addr = *inHostPort
 	s.Domain = subject
 	s.ReadTimeout = 60 * time.Second
 	s.WriteTimeout = 60 * time.Second
