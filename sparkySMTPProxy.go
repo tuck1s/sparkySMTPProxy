@@ -44,15 +44,14 @@ func (bkd *Backend) logger(args ...interface{}) {
 // Init the backend. Here we establish the upstream connection
 func (bkd *Backend) Init() (smtpproxy.Session, error) {
 	var s Session
-	bkd.logger("---Session begins")
+	bkd.logger("---Connecting upstream")
 	c, err := smtpproxy.Dial(bkd.outHostPort)
-	if err != nil {
-		bkd.logger("\t<~ Connection error", bkd.outHostPort, err)
-		return &s, err
-	}
-	bkd.logger("\t<~ Connection success", bkd.outHostPort)
 	s.bkd = bkd    // just for logging
 	s.upstream = c // keep record of the upstream Client connection
+	if err != nil {
+		bkd.logger(respTwiddle(&s), "Connection error", bkd.outHostPort, err)
+	}
+	bkd.logger(respTwiddle(&s), "Connection success", bkd.outHostPort)
 	return &s, nil
 }
 
@@ -66,6 +65,22 @@ type Session struct {
 	upstream *smtpproxy.Client // the upstream client this backend is driving
 }
 
+// cmdTwiddle returns different flow markers depending on whether connection is secure (like Swaks does)
+func cmdTwiddle(s *Session) string {
+	if _, isTLS := s.upstream.TLSConnectionState(); isTLS {
+		return "~>"
+	}
+	return "->"
+}
+
+// respTwiddle returns different flow markers depending on whether connection is secure (like Swaks does)
+func respTwiddle(s *Session) string {
+	if _, isTLS := s.upstream.TLSConnectionState(); isTLS {
+		return "\t<~"
+	}
+	return "\t<-"
+}
+
 // Greet the upstream host and report capabilities back.
 func (s *Session) Greet(helotype string) ([]string, int, string, error) {
 	var (
@@ -73,12 +88,12 @@ func (s *Session) Greet(helotype string) ([]string, int, string, error) {
 		code int
 		msg  string
 	)
-	s.bkd.logger("~>", helotype)
+	s.bkd.logger(cmdTwiddle(s), helotype)
 	host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
 	if code, msg, err = s.upstream.Hello(host); err == nil {
-		s.bkd.logger("\t<~", helotype, "success")
+		s.bkd.logger(respTwiddle(s), helotype, "success")
 	} else {
-		s.bkd.logger("\t<~", helotype, "error", err)
+		s.bkd.logger(respTwiddle(s), helotype, "error", err)
 		return nil, code, msg, err
 	}
 	caps := s.upstream.Capabilities()
@@ -86,22 +101,19 @@ func (s *Session) Greet(helotype string) ([]string, int, string, error) {
 
 	// Check for "eager" upstream TLS mode
 	if _, isTLS := s.upstream.TLSConnectionState(); !isTLS && s.bkd.requireUpstreamTLS {
-		if Contains(caps, "STARTTLS") {
-			s.bkd.logger("\tInfo: requesting immediate upstream STARTTLS")
-			err = s.StartTLS()
-		} else {
-			errMsg := "Proxy setting requires upstream TLS, upstream server " + s.bkd.outHostPort + " does not support it"
-			s.bkd.logger("\tError:", errMsg)
-			err = errors.New(errMsg)
-			code = 421
-			msg = err.Error()
-		}
+		s.bkd.logger("\tInfo: requesting immediate upstream STARTTLS")
+		code, msg, err = s.StartTLS()
 	}
 	return caps, code, msg, err
 }
 
 // StartTLS command
-func (s *Session) StartTLS() error {
+func (s *Session) StartTLS() (int, string, error) {
+	var (
+		err  error
+		code int
+		msg  string
+	)
 	c := s.upstream
 	if _, isTLS := c.TLSConnectionState(); !isTLS {
 		// STARTTLS on upstream host, if it is not already running, and has the capability, checking its cert is also valid
@@ -112,15 +124,25 @@ func (s *Session) StartTLS() error {
 				InsecureSkipVerify: false,
 				ServerName:         host,
 			}
-			s.bkd.logger("\t~> STARTTLS")
-			if err := c.StartTLS(tlsconfig); err != nil {
-				s.bkd.logger("\t<~ STARTTLS error", err)
-				return err
+			s.bkd.logger(cmdTwiddle(s), "STARTTLS")
+			if code, msg, err = c.StartTLS(tlsconfig); err != nil {
+				s.bkd.logger(respTwiddle(s), "STARTTLS error", err)
+			} else {
+				s.bkd.logger(respTwiddle(s), "STARTTLS success")
 			}
-			s.bkd.logger("\t<~ STARTTLS success")
+		} else {
+			code = 421 //TODO let upstream server report this?
+			msg = "STARTTLS requested, upstream server " + s.bkd.outHostPort + " does not support it"
+			err = errors.New(msg)
 		}
+	} else {
+		// Handle the case where we are already TLS on upstream from "eager" option
+		code = 220
+		msg = "2.0.0 Ready to start TLS, upstream side is already secure"
+		err = nil
+		s.bkd.logger(msg)
 	}
-	return nil
+	return code, msg, err
 }
 
 //Auth command backend handler
@@ -155,7 +177,7 @@ func (s *Session) Unknown(expectcode int, cmd, arg string) (int, string, error) 
 
 // Passthru a command to the upstream server, logging
 func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error) {
-	s.bkd.logger("~>", cmd, arg)
+	s.bkd.logger(cmdTwiddle(s), cmd, arg)
 	var joined string
 	if arg == "" {
 		joined = cmd
@@ -163,16 +185,16 @@ func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error)
 		joined = cmd + " " + arg
 	}
 	code, msg, err := s.upstream.MyCmd(expectcode, joined)
-	s.bkd.logger("\t<~", code, msg)
+	s.bkd.logger(respTwiddle(s), code, msg)
 	return code, msg, err
 }
 
 // DataCommand pass upstream, returning a place to write the data AND the usual responses
 func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
-	s.bkd.logger("~> DATA")
+	s.bkd.logger(cmdTwiddle(s), "DATA")
 	w, code, msg, err := s.upstream.Data()
 	if err != nil {
-		s.bkd.logger("\t<~ DATA error", err)
+		s.bkd.logger(respTwiddle(s), "DATA error", err)
 	}
 	return w, code, msg, err
 }
@@ -181,16 +203,17 @@ func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
 	_, err := io.Copy(w, r)
 	if err != nil {
-		s.bkd.logger("\t<~ DATA io.Copy error", err)
-		return 0, "DATA io.Copy error", err
+		msg := "DATA io.Copy error"
+		s.bkd.logger(respTwiddle(s), msg, err)
+		return 0, msg, err
 	}
 	err = w.Close()
 	code := s.upstream.DataResponseCode
 	msg := s.upstream.DataResponseMsg
 	if err != nil {
-		s.bkd.logger("\t<~ DATA Close error", err)
+		s.bkd.logger(respTwiddle(s), "DATA Close error", err)
 	} else {
-		s.bkd.logger("\t<~ DATA accepted")
+		s.bkd.logger(respTwiddle(s), "DATA accepted")
 	}
 	return code, msg, err
 }
@@ -221,15 +244,16 @@ func main() {
 	s.Addr = *inHostPort
 	s.ReadTimeout = 60 * time.Second
 	s.WriteTimeout = 60 * time.Second
-	subject, err := os.Hostname() // This is the fallback in case we have no cert / privkey to give us a Subject
 
+	subject, err := os.Hostname() // This is the fallback in case we have no cert / privkey to give us a Subject
 	if err != nil {
 		log.Fatal("Can't read hostname")
 	}
+
+	// Gather TLS credentials from filesystem. Use these with the server and also set the EHLO server name
 	if *certfile == "" || *privkeyfile == "" {
 		log.Println("Warning: certfile or privkeyfile not specified - proxy will NOT offer STARTTLS to clients")
 	} else {
-		// Gather TLS credentials from filesystem, use these with the server and also set the EHLO server name
 		cer, err := tls.LoadX509KeyPair(*certfile, *privkeyfile)
 		if err != nil {
 			log.Fatal(err)
