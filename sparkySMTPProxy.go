@@ -90,19 +90,25 @@ func (s *Session) Greet(helotype string) ([]string, int, string, error) {
 	)
 	s.bkd.logger(cmdTwiddle(s), helotype)
 	host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
-	if code, msg, err = s.upstream.Hello(host); err == nil {
-		s.bkd.logger(respTwiddle(s), helotype, "success")
-	} else {
+	code, msg, err = s.upstream.Hello(host)
+	if err != nil {
 		s.bkd.logger(respTwiddle(s), helotype, "error", err)
 		return nil, code, msg, err
 	}
+	s.bkd.logger(respTwiddle(s), helotype, "success")
 	caps := s.upstream.Capabilities()
 	s.bkd.logger("\tUpstream capabilities:", caps)
 
 	// Check for "eager" upstream TLS mode
 	if _, isTLS := s.upstream.TLSConnectionState(); !isTLS && s.bkd.requireUpstreamTLS {
-		s.bkd.logger("\tInfo: requesting immediate upstream STARTTLS")
+		s.bkd.logger("\tTrying immediate upstream STARTTLS")
 		code, msg, err = s.StartTLS()
+		if err != nil {
+			code = 500
+			msg = "Problem with upstream connection at the moment, sorry"
+			s.bkd.logger("\t", msg)
+			err = errors.New(msg)
+		}
 	}
 	return caps, code, msg, err
 }
@@ -110,35 +116,31 @@ func (s *Session) Greet(helotype string) ([]string, int, string, error) {
 // StartTLS command
 func (s *Session) StartTLS() (int, string, error) {
 	var (
-		err  error
 		code int
 		msg  string
+		err  error
 	)
 	c := s.upstream
 	if _, isTLS := c.TLSConnectionState(); !isTLS {
 		// STARTTLS on upstream host, if it is not already running, and has the capability, checking its cert is also valid
 		host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
 
-		if Contains(c.Capabilities(), "STARTTLS") {
-			tlsconfig := &tls.Config{
-				InsecureSkipVerify: false,
-				ServerName:         host,
-			}
-			s.bkd.logger(cmdTwiddle(s), "STARTTLS")
-			if code, msg, err = c.StartTLS(tlsconfig); err != nil {
-				s.bkd.logger(respTwiddle(s), "STARTTLS error", err)
-			} else {
-				s.bkd.logger(respTwiddle(s), "STARTTLS success")
-			}
+		// Try the upstream server, it will report error if unsupported
+		tlsconfig := &tls.Config{
+			InsecureSkipVerify: false,
+			ServerName:         host,
+		}
+		s.bkd.logger(cmdTwiddle(s), "STARTTLS")
+		code, msg, err = c.StartTLS(tlsconfig)
+		if err != nil {
+			s.bkd.logger(respTwiddle(s), "STARTTLS error", err)
 		} else {
-			code = 421 //TODO let upstream server report this?
-			msg = "STARTTLS requested, upstream server " + s.bkd.outHostPort + " does not support it"
-			err = errors.New(msg)
+			s.bkd.logger(respTwiddle(s), "STARTTLS success")
 		}
 	} else {
-		// Handle the case where we are already TLS on upstream from "eager" option
+		// Handle the case where we are already secure upstream with "eager" option
 		code = 220
-		msg = "2.0.0 Ready to start TLS, upstream side is already secure"
+		msg = "2.0.0 Ready to start TLS, upstream is already secure"
 		err = nil
 		s.bkd.logger(msg)
 	}
