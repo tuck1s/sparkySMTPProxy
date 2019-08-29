@@ -142,7 +142,7 @@ func (s *Session) StartTLS() (int, string, error) {
 		code = 220
 		msg = "2.0.0 Ready to start TLS, upstream is already secure"
 		err = nil
-		s.bkd.logger(msg)
+		s.bkd.logger(respTwiddle(s), msg)
 	}
 	return code, msg, err
 }
