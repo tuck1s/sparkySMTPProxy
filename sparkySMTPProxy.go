@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/tuck1s/go-smtpproxy"
@@ -45,6 +44,7 @@ func (bkd *Backend) logger(args ...interface{}) {
 // Init the backend. Here we establish the upstream connection
 func (bkd *Backend) Init() (smtpproxy.Session, error) {
 	var s Session
+	bkd.logger("---Session begins")
 	c, err := smtpproxy.Dial(bkd.outHostPort)
 	if err != nil {
 		bkd.logger("\t<~ Connection error", bkd.outHostPort, err)
@@ -67,27 +67,37 @@ type Session struct {
 }
 
 // Greet the upstream host and report capabilities back.
-func (s *Session) Greet(helotype string) ([]string, error) {
-	var err error
+func (s *Session) Greet(helotype string) ([]string, int, string, error) {
+	var (
+		err  error
+		code int
+		msg  string
+	)
 	s.bkd.logger("~>", helotype)
 	host, _, _ := net.SplitHostPort(s.bkd.outHostPort)
-	if err = s.upstream.Hello(host); err == nil {
+	if code, msg, err = s.upstream.Hello(host); err == nil {
 		s.bkd.logger("\t<~", helotype, "success")
 	} else {
 		s.bkd.logger("\t<~", helotype, "error", err)
-		return nil, err
+		return nil, code, msg, err
 	}
 	caps := s.upstream.Capabilities()
 	s.bkd.logger("\tUpstream capabilities:", caps)
+
+	// Check for "eager" upstream TLS mode
 	if _, isTLS := s.upstream.TLSConnectionState(); !isTLS && s.bkd.requireUpstreamTLS {
 		if Contains(caps, "STARTTLS") {
-			s.bkd.logger("Info: requesting immediate upstream STARTTLS")
+			s.bkd.logger("\tInfo: requesting immediate upstream STARTTLS")
 			err = s.StartTLS()
 		} else {
-			err = errors.New("setting requires upstream STARTTLS, server doesn't support")
+			errMsg := "Proxy setting requires upstream TLS, upstream server " + s.bkd.outHostPort + " does not support it"
+			s.bkd.logger("\tError:", errMsg)
+			err = errors.New(errMsg)
+			code = 421
+			msg = err.Error()
 		}
 	}
-	return caps, err
+	return caps, code, msg, err
 }
 
 // StartTLS command
@@ -103,7 +113,7 @@ func (s *Session) StartTLS() error {
 				ServerName:         host,
 			}
 			s.bkd.logger("\t~> STARTTLS")
-			if err := c.BasicStartTLS(tlsconfig); err != nil {
+			if err := c.StartTLS(tlsconfig); err != nil {
 				s.bkd.logger("\t<~ STARTTLS error", err)
 				return err
 			}
@@ -191,8 +201,8 @@ func main() {
 	inHostPort := flag.String("in_hostport", "localhost:587", "Port number to serve incoming SMTP requests")
 	outHostPort := flag.String("out_hostport", "smtp.sparkpostmail.com:587", "host:port for onward routing of SMTP requests")
 	verboseOpt := flag.Bool("verbose", false, "print out lots of messages")
-	certfile := flag.String("certfile", "fullchain.pem", "Certificate file for this server")
-	privkeyfile := flag.String("privkeyfile", "privkey.pem", "Private key file for this server")
+	certfile := flag.String("certfile", "", "Certificate file for this server")
+	privkeyfile := flag.String("privkeyfile", "", "Private key file for this server")
 	serverDebug := flag.String("server_debug", "", "File to write server SMTP conversation for debugging")
 	requireUpstreamTLS := flag.Bool("require_upstream_tls", false, "Force upstream server to TLS (raise error if it can't)")
 	flag.Parse()
@@ -200,38 +210,45 @@ func main() {
 	log.Println("Incoming host:port set to", *inHostPort)
 	log.Println("Outgoing host:port set to", *outHostPort)
 
-	// Gather TLS credentials from filesystem, use these with the server and also set the EHLO server name
-	cer, err := tls.LoadX509KeyPair(*certfile, *privkeyfile)
-	if err != nil {
-		log.Fatal(err)
-	}
-	config := &tls.Config{Certificates: []tls.Certificate{cer}}
-
-	leafCert, err := x509.ParseCertificate(cer.Certificate[0])
-	if err != nil {
-		log.Fatal(err)
-	}
-	subjectDN := leafCert.Subject.ToRDNSequence().String()
-	subject := strings.Split(subjectDN, "=")[1]
-	log.Println("Gathered certificate", *certfile, "and key", *privkeyfile)
-	log.Println("Incoming server name will advertise as", subject)
-
 	// Set up parameters that the backend will use
 	be := &Backend{
 		outHostPort:        *outHostPort,
 		verbose:            *verboseOpt,
 		requireUpstreamTLS: *requireUpstreamTLS,
 	}
-	log.Println("Backend logging:", be.verbose)
-	log.Println("Require upstream server to support STARTTLS:", be.requireUpstreamTLS)
 
 	s := smtpproxy.NewServer(be)
 	s.Addr = *inHostPort
-	s.Domain = subject
 	s.ReadTimeout = 60 * time.Second
 	s.WriteTimeout = 60 * time.Second
-	// s.AllowInsecureAuth = true
-	s.TLSConfig = config
+	subject, err := os.Hostname() // This is the fallback in case we have no cert / privkey to give us a Subject
+
+	if err != nil {
+		log.Fatal("Can't read hostname")
+	}
+	if *certfile == "" || *privkeyfile == "" {
+		log.Println("Warning: certfile or privkeyfile not specified - proxy will NOT offer STARTTLS to clients")
+	} else {
+		// Gather TLS credentials from filesystem, use these with the server and also set the EHLO server name
+		cer, err := tls.LoadX509KeyPair(*certfile, *privkeyfile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		config := &tls.Config{Certificates: []tls.Certificate{cer}}
+		s.TLSConfig = config
+
+		leafCert, err := x509.ParseCertificate(cer.Certificate[0])
+		if err != nil {
+			log.Fatal(err)
+		}
+		subject = leafCert.Subject.CommonName
+		log.Println("Gathered certificate", *certfile, "and key", *privkeyfile)
+	}
+	s.Domain = subject
+	log.Println("Strictly require upstream server to support STARTTLS:", be.requireUpstreamTLS)
+	log.Println("Proxy will advertise itself as", s.Domain)
+	log.Println("Backend logging:", be.verbose)
+
 	if *serverDebug != "" {
 		dbgFile, err := os.OpenFile(*serverDebug, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
