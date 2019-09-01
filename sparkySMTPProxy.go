@@ -61,9 +61,13 @@ func (bkd *Backend) Init() (smtpproxy.Session, error) {
 
 // A Session is returned after successful login. Here hold information that needs to persist across message phases.
 type Session struct {
-	bkd      *Backend          // The backend that created this session. Allows session methods to e.g. log
-	upstream *smtpproxy.Client // the upstream client this backend is driving
+	bkd           *Backend          // The backend that created this session. Allows session methods to e.g. log
+	upstream      *smtpproxy.Client // the upstream client this backend is driving
+	blockUpstream bool              // Flag to prevent any further use of this session
 }
+
+const upstreamBlockMsg = "Unable to handle messages at the moment, sorry"
+const upstreamBlockCode = 500
 
 // cmdTwiddle returns different flow markers depending on whether connection is secure (like Swaks does)
 func cmdTwiddle(s *Session) string {
@@ -104,10 +108,11 @@ func (s *Session) Greet(helotype string) ([]string, int, string, error) {
 		s.bkd.logger("\tTrying immediate upstream STARTTLS")
 		code, msg, err = s.StartTLS()
 		if err != nil {
-			code = 500
-			msg = "Problem with upstream connection at the moment, sorry"
+			code = upstreamBlockCode
+			msg = upstreamBlockMsg
 			s.bkd.logger("\t", msg)
 			err = errors.New(msg)
+			s.blockUpstream = true // Prevent any further use of this session
 		}
 	}
 	return caps, code, msg, err
@@ -115,8 +120,7 @@ func (s *Session) Greet(helotype string) ([]string, int, string, error) {
 
 // StartTLS command
 func (s *Session) StartTLS() (int, string, error) {
-	c := s.upstream
-	if _, isTLS := c.TLSConnectionState(); isTLS {
+	if _, isTLS := s.upstream.TLSConnectionState(); isTLS {
 		// Handle the case where we are already secure upstream with "eager" option
 		code := 220
 		msg := "2.0.0 Ready to start TLS, upstream is already secure"
@@ -131,7 +135,11 @@ func (s *Session) StartTLS() (int, string, error) {
 		ServerName:         host,
 	}
 	s.bkd.logger(cmdTwiddle(s), "STARTTLS")
-	code, msg, err := c.StartTLS(tlsconfig)
+	if s.blockUpstream {
+		s.bkd.logger("\t", upstreamBlockMsg)
+		return upstreamBlockCode, "4.0.0 " + upstreamBlockMsg, errors.New(upstreamBlockMsg)
+	}
+	code, msg, err := s.upstream.StartTLS(tlsconfig)
 	s.bkd.logger(respTwiddle(s), code, msg)
 	return code, msg, err
 }
@@ -169,10 +177,12 @@ func (s *Session) Unknown(expectcode int, cmd, arg string) (int, string, error) 
 // Passthru a command to the upstream server, logging
 func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error) {
 	s.bkd.logger(cmdTwiddle(s), cmd, arg)
-	var joined string
-	if arg == "" {
-		joined = cmd
-	} else {
+	if s.blockUpstream {
+		s.bkd.logger("\t", upstreamBlockMsg)
+		return upstreamBlockCode, "4.0.0 " + upstreamBlockMsg, errors.New(upstreamBlockMsg)
+	}
+	joined := cmd
+	if arg != "" {
 		joined = cmd + " " + arg
 	}
 	code, msg, err := s.upstream.MyCmd(expectcode, joined)
@@ -183,6 +193,10 @@ func (s *Session) Passthru(expectcode int, cmd, arg string) (int, string, error)
 // DataCommand pass upstream, returning a place to write the data AND the usual responses
 func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 	s.bkd.logger(cmdTwiddle(s), "DATA")
+	if s.blockUpstream {
+		s.bkd.logger("\t", upstreamBlockMsg)
+		return nil, upstreamBlockCode, "4.0.0 " + upstreamBlockMsg, errors.New(upstreamBlockMsg)
+	}
 	w, code, msg, err := s.upstream.Data()
 	if err != nil {
 		s.bkd.logger(respTwiddle(s), "DATA error", err)
