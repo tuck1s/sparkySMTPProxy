@@ -1,0 +1,22 @@
+To: steve.tuck@sparkpost.com
+From: Steve <steve@email.thetucks.com>
+Subject: Test html email
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Language: en-GB
+Content-Transfer-Encoding: 7bit
+
+<html>
+  <head>
+
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+  </head>
+  <body text="#000000" bgcolor="#FFFFFF">
+    <p>It's only the <font color="#999900"><b>hairs on the </b><b><a
+            moz-do-not-send="true"
+            href="https://en.wikipedia.org/wiki/Gooseberry">gooseberry</a></b></font>
+      that prevent it from being a grape.</p>
+    <p><br>
+    </p>
+  </body>
+</html>
