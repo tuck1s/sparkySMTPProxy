@@ -5,3 +5,4 @@ debug*.txt
 .DS_Store
 *.code-workspace
 __debug_bin
+*.eml
