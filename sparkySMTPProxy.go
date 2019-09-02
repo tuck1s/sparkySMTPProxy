@@ -206,7 +206,7 @@ func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 
 // Data body (dot delimited) pass upstream, returning the usual responses
 func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
-	_, err := MailCopy(w, r)
+	bytesWritten, err := MailCopy(w, r)
 	if err != nil {
 		msg := "DATA io.Copy error"
 		s.bkd.logger(respTwiddle(s), msg, err)
@@ -216,9 +216,10 @@ func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
 	code := s.upstream.DataResponseCode
 	msg := s.upstream.DataResponseMsg
 	if err != nil {
-		s.bkd.logger(respTwiddle(s), "DATA Close error", err)
+		s.bkd.logger(respTwiddle(s), "DATA Close error", err, ", bytes written =", bytesWritten)
 	} else {
-		s.bkd.logger(respTwiddle(s), "DATA accepted")
+		s.bkd.logger(respTwiddle(s), "DATA accepted, bytes written =", bytesWritten)
+		s.bkd.logger(respTwiddle(s), code, msg)
 	}
 	return code, msg, err
 }
