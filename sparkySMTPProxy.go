@@ -206,7 +206,7 @@ func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 
 // Data body (dot delimited) pass upstream, returning the usual responses
 func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
-	_, err := io.Copy(w, r)
+	_, err := MailCopy(w, r)
 	if err != nil {
 		msg := "DATA io.Copy error"
 		s.bkd.logger(respTwiddle(s), msg, err)
