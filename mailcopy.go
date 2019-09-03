@@ -3,11 +3,14 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"io"
 	"log"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
+	"net/textproto"
 	"strings"
 )
 
@@ -29,12 +32,13 @@ func mailCopy(dst io.Writer, src io.Reader) (int, error) {
 	if err != nil {
 		return bytesWritten, err
 	}
+
 	// Pass through headers. The m.Header map does not preserve order, but that should not matter.
 	for hdrType, hdrList := range message.Header {
 		for _, hdrVal := range hdrList {
 			hdrLine := hdrType + ": " + hdrVal + smtpCRLF
 			log.Print("\t", hdrLine)
-			bw, err := dst.Write([]byte(hdrLine))
+			bw, err := io.WriteString(dst, hdrLine)
 			bytesWritten += bw
 			if err != nil {
 				return bytesWritten, err
@@ -63,11 +67,10 @@ func handleMessageBody(dst io.Writer, msgHeader mail.Header, msgBody io.Reader) 
 	return handleMessagePart(dst, msgBody, cType, cte)
 }
 
-// handleMessagePart walks the MIME structure, and may be called recursively
-func handleMessagePart(dst io.Writer, msgBody io.Reader, cType string, cte string) (int, error) {
+// handleMessagePart walks the MIME structure, and may be called recursively. The incoming
+// content type and cte (content transfer encoding) are passed separately
+func handleMessagePart(dst io.Writer, part io.Reader, cType string, cte string) (int, error) {
 	bytesWritten := 0
-	// Check Content-Type header - if not present, just copy mail through
-
 	// Check what MIME media type we have.
 	mediaType, params, err := mime.ParseMediaType(cType)
 	if err != nil {
@@ -75,21 +78,31 @@ func handleMessagePart(dst io.Writer, msgBody io.Reader, cType string, cte strin
 	}
 	log.Printf("\t\tContent-Type: %s, Content-Transfer-Encoding: %s\n", mediaType, cte)
 	if strings.HasPrefix(mediaType, "text/html") {
-		knownCtes := []string{"", "7bit"} //TODO: unpack base64 properly
-		if !Contains(knownCtes, cte) {
-			log.Println("Warning: don't know how to handle Content-Type-Encoding", cte)
+		// Insert decoder into incoming part, and encoder into dst
+		if cte == "base64" {
+			part = base64.NewDecoder(base64.StdEncoding, part)
+		} else {
+			if cte == "quoted-printable" {
+				// Insert decoder into incoming part, and encoder into dst
+				part = quotedprintable.NewReader(part)
+			} else {
+				if !(cte == "" || cte == "7bit" || cte == "8bit") {
+					log.Println("Warning: don't know how to handle Content-Type-Encoding", cte)
+				}
+			}
 		}
-		bytesWritten, err = handleHTMLPart(dst, msgBody)
+		dst = quotedprintable.NewWriter(dst)
+		bytesWritten, err = handleHTMLPart(dst, part)
 	} else {
 		if strings.HasPrefix(mediaType, "multipart/") {
-			mr := multipart.NewReader(msgBody, params["boundary"])
+			mr := multipart.NewReader(part, params["boundary"])
 			bytesWritten, err = handleMultiPart(dst, mr, params["boundary"])
 		} else {
 			if strings.HasPrefix(mediaType, "message/rfc822") {
-				bytesWritten, err = mailCopy(dst, msgBody)
+				bytesWritten, err = mailCopy(dst, part)
 			} else {
 				// Everything else such as text/plain, image/gif etc pass through
-				bytesWritten, err = handlePlainPart(dst, msgBody)
+				bytesWritten, err = handlePlainPart(dst, part)
 			}
 		}
 	}
@@ -127,9 +140,28 @@ func handleMultiPart(dst io.Writer, mr *multipart.Reader, bound string) (int, er
 		// Create a part writer with the current boundary and header properties
 		pWrt := multipart.NewWriter(dst)
 		pWrt.SetBoundary(bound)
-		pWrt2, err := pWrt.CreatePart(p.Header)
 		cType := p.Header.Get("Content-Type")
 		cte := p.Header.Get("Content-Transfer-Encoding")
+		// Set up the output part headers. html will always come out quoted-printable
+		ph := textproto.MIMEHeader{
+			"Content-Type":              []string{},
+			"Content-Transfer-Encoding": []string{},
+		}
+		ph.Set("Content-Type", cType)
+		var pWrt2 io.Writer
+		if strings.HasPrefix(cType, "text/html") {
+			ph.Set("Content-Transfer-Encoding", "quoted-printable")
+			pWrt2, err = pWrt.CreatePart(ph)
+			if err != nil {
+				return bytesWritten, err
+			}
+		} else {
+			ph.Set("Content-Transfer-Encoding", cte)
+			pWrt2, err = pWrt.CreatePart(ph)
+			if err != nil {
+				return bytesWritten, err
+			}
+		}
 		bw, err := handleMessagePart(pWrt2, p, cType, cte)
 		bytesWritten += bw
 		if err != nil {

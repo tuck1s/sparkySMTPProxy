@@ -206,6 +206,13 @@ func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 
 // Data body (dot delimited) pass upstream, returning the usual responses
 func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
+
+	if true { // DEBUG
+		w, _ = os.Create("body-debug.eml")
+		s.upstream.DataResponseCode = 250
+		s.upstream.DataResponseMsg = "Fake OK from debugger"
+	}
+
 	bytesWritten, err := mailCopy(w, r)
 	if err != nil {
 		msg := "DATA io.Copy error"
