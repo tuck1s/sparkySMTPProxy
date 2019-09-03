@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+const smtpCRLF = "\r\n"
+
 /* If you just want to pass through the entire mail headers and body, you can just use
    the following alernative:
 
@@ -19,105 +21,126 @@ func MailCopy(dst io.Writer, src io.Reader) (int64, error) {
 }
 */
 
-// MailCopy transfers the mail body from downstream (client) to upstream (server)
+// mailCopy transfers the mail body from downstream (client) to upstream (server)
 // The writer will be closed by the parent function, no need to close it here.
-func MailCopy(dst io.Writer, src io.Reader) (int, error) {
-	var totalWritten int
-
-	const smtpCRLF = "\r\n"
+func mailCopy(dst io.Writer, src io.Reader) (int, error) {
+	bytesWritten := 0
 	message, err := mail.ReadMessage(bufio.NewReader(src))
 	if err != nil {
-		return totalWritten, err
+		return bytesWritten, err
 	}
 	// Pass through headers. The m.Header map does not preserve order, but that should not matter.
 	for hdrType, hdrList := range message.Header {
 		for _, hdrVal := range hdrList {
 			hdrLine := hdrType + ": " + hdrVal + smtpCRLF
 			log.Print("\t", hdrLine)
-			bytesWritten, err := dst.Write([]byte(hdrLine))
-			totalWritten += bytesWritten
+			bw, err := dst.Write([]byte(hdrLine))
+			bytesWritten += bw
 			if err != nil {
-				return totalWritten, err
+				return bytesWritten, err
 			}
 		}
 	}
 	// Blank line denotes end of headers
-	//bytesWritten, err := io.Copy(dst, strings.NewReader(smtpCRLF))
-	bytesWritten, err := io.WriteString(dst, smtpCRLF)
-	totalWritten += bytesWritten
-	if err != nil {
-		return totalWritten, err
-	}
-
-	bytesWritten, err = bodyCopy(dst, message.Header, message.Body)
-	totalWritten += bytesWritten
-	return totalWritten, err
-}
-
-// bodyCopy copies the mail message from msg to dst, with awareness of MIME parts.
-// This is probably a naive implementation when it comes to complex multi-part messages and
-// differing encodings.
-func bodyCopy(dst io.Writer, msgHeader mail.Header, msgBody io.Reader) (int, error) {
-	var bytesWritten int
-
-	// Check Content-Type header - if not present, just copy mail through
-	cType := msgHeader.Get("Content-Type")
-	if cType == "" {
-		return partCopy(dst, msgBody) // Passthrough
-	}
-	// Check what MIME media type we have.
-	mediaType, params, err := mime.ParseMediaType(cType)
-	cEncoding := msgHeader.Get("Content-Transfer-Encoding")
-	if cEncoding != "" {
-		log.Println("Warning: don't know how to handle ", cEncoding)
-	}
+	bw, err := io.WriteString(dst, smtpCRLF)
+	bytesWritten += bw
 	if err != nil {
 		return bytesWritten, err
 	}
-	if strings.HasPrefix(mediaType, "text/plain") {
-		return partCopy(dst, msgBody) // Passthrough
+
+	// Handle the message body
+	bw, err = handleMessageBody(dst, message.Header, message.Body)
+	bytesWritten += bw
+	return bytesWritten, err
+}
+
+// handleMessageBody copies the mail message from msg to dst, with awareness of MIME parts.
+// This is probably a naive implementation when it comes to complex multi-part messages and
+// differing encodings.
+func handleMessageBody(dst io.Writer, msgHeader mail.Header, msgBody io.Reader) (int, error) {
+	cType := msgHeader.Get("Content-Type")
+	cte := msgHeader.Get("Content-Transfer-Encoding")
+	return handleMessagePart(dst, msgBody, cType, cte)
+}
+
+// handleMessagePart walks the MIME structure, and may be called recursively
+func handleMessagePart(dst io.Writer, msgBody io.Reader, cType string, cte string) (int, error) {
+	bytesWritten := 0
+	// Check Content-Type header - if not present, just copy mail through
+
+	// Check what MIME media type we have.
+	mediaType, params, err := mime.ParseMediaType(cType)
+	if err != nil {
+		return bytesWritten, err
 	}
+	log.Printf("\t\tContent-Type: %s, Content-Transfer-Encoding: %s\n", mediaType, cte)
 	if strings.HasPrefix(mediaType, "text/html") {
-		return htmlPartTransfer(dst, msgBody)
-	}
-	if strings.HasPrefix(mediaType, "multipart/") {
-		mr := multipart.NewReader(msgBody, params["boundary"])
-		for {
-			p, err := mr.NextPart()
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return bytesWritten, err // EOF (normal) or error
-			}
-			pType := p.Header.Get("Content-Type")
-			pEncoding := p.Header.Get("Content-Transfer-Encoding")
-			if pEncoding != "" {
-				log.Println("Warning: don't know how to handle ", cEncoding)
-			}
-			pWrt := multipart.NewWriter(dst)
-			pWrt.SetBoundary(params["boundary"])
-			pWrt2, err := pWrt.CreatePart(p.Header)
-			// TODO pWrt3 := quotedprintable.NewWriter(pWrt2) // Brute force method, converts everything back to QP. Don't want to do this!
-			bytesWritten, err := partCopy(pWrt2, p)
-			if err != nil {
-				return bytesWritten, err
-			}
-			log.Printf("\t\tContent-type: %s = %d bytes\n", pType, bytesWritten)
+		knownCtes := []string{"", "7bit"} //TODO: unpack base64 properly
+		if !Contains(knownCtes, cte) {
+			log.Println("Warning: don't know how to handle Content-Type-Encoding", cte)
 		}
-		// TONeed to write a separator here?
+		bytesWritten, err = handleHTMLPart(dst, msgBody)
+	} else {
+		if strings.HasPrefix(mediaType, "multipart/") {
+			mr := multipart.NewReader(msgBody, params["boundary"])
+			bytesWritten, err = handleMultiPart(dst, mr, params["boundary"])
+		} else {
+			if strings.HasPrefix(mediaType, "message/rfc822") {
+				bytesWritten, err = mailCopy(dst, msgBody)
+			} else {
+				// Everything else such as text/plain, image/gif etc pass through
+				bytesWritten, err = handlePlainPart(dst, msgBody)
+			}
+		}
 	}
 	return bytesWritten, err
 }
 
-// Copy through a MIME part. Should not run into int / int64 issues with emails
-func partCopy(dst io.Writer, src io.Reader) (int, error) {
+// Transfer through a plain MIME part
+func handlePlainPart(dst io.Writer, src io.Reader) (int, error) {
 	written, err := io.Copy(dst, src) // Passthrough
 	return int(written), err
 }
 
-// Copy through a MIME part, wrapping links etc
-func htmlPartTransfer(dst io.Writer, src io.Reader) (int, error) {
+// Transfer through an html MIME part, wrapping links etc
+func handleHTMLPart(dst io.Writer, src io.Reader) (int, error) {
 	written, err := io.Copy(dst, src) // Passthrough
 	return int(written), err
+}
+
+// Transfer through a multipart message, handling recursively as needed
+func handleMultiPart(dst io.Writer, mr *multipart.Reader, bound string) (int, error) {
+	bytesWritten := 0
+	var err error
+	// Insert the
+	bw, err := io.WriteString(dst, "This is a multi-part message in MIME format."+smtpCRLF)
+	bytesWritten += bw
+	for {
+		p, err := mr.NextPart()
+		if err != nil {
+			if err == io.EOF {
+				err = nil // Usual termination
+				break
+			}
+			return bytesWritten, err // Unexpected error
+		}
+		// Create a part writer with the current boundary and header properties
+		pWrt := multipart.NewWriter(dst)
+		pWrt.SetBoundary(bound)
+		pWrt2, err := pWrt.CreatePart(p.Header)
+		cType := p.Header.Get("Content-Type")
+		cte := p.Header.Get("Content-Transfer-Encoding")
+		bw, err := handleMessagePart(pWrt2, p, cType, cte)
+		bytesWritten += bw
+		if err != nil {
+			return bytesWritten, err
+		}
+		// Put a newline in before the next part
+		bw, err = io.WriteString(dst, smtpCRLF)
+		bytesWritten += bw
+	}
+	// Put the terminating boundary in
+	bw, err = io.WriteString(dst, "--"+bound+smtpCRLF)
+	bytesWritten += bw
+	return bytesWritten, err
 }

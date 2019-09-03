@@ -213,7 +213,7 @@ func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
 	s.upstream.DataResponseMsg = "Fake OK from debugger"
 	// DEBUG
 
-	bytesWritten, err := MailCopy(w, r)
+	bytesWritten, err := mailCopy(w, r)
 	if err != nil {
 		msg := "DATA io.Copy error"
 		s.bkd.logger(respTwiddle(s), msg, err)
