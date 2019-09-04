@@ -8,9 +8,7 @@ import (
 	"log"
 	"mime"
 	"mime/multipart"
-	"mime/quotedprintable"
 	"net/mail"
-	"net/textproto"
 	"strings"
 )
 
@@ -78,20 +76,19 @@ func handleMessagePart(dst io.Writer, part io.Reader, cType string, cte string) 
 	}
 	log.Printf("\t\tContent-Type: %s, Content-Transfer-Encoding: %s\n", mediaType, cte)
 	if strings.HasPrefix(mediaType, "text/html") {
-		// Insert decoder into incoming part, and encoder into dst
+		// Insert decoder into incoming part, and encoder into dst. Quoted-Printable is automatically handled
+		// by the reader, no need to handle here: https://golang.org/src/mime/multipart/multipart.go?s=825:1710#L25
 		if cte == "base64" {
 			part = base64.NewDecoder(base64.StdEncoding, part)
+			// pass output through base64 encoding -> line splitter
+			var ls linesplitter
+			lsWriter := ls.NewWriter(76, []byte("\r\n"), dst)
+			dst = base64.NewEncoder(base64.StdEncoding, lsWriter)
 		} else {
-			if cte == "quoted-printable" {
-				// Insert decoder into incoming part, and encoder into dst
-				part = quotedprintable.NewReader(part)
-			} else {
-				if !(cte == "" || cte == "7bit" || cte == "8bit") {
-					log.Println("Warning: don't know how to handle Content-Type-Encoding", cte)
-				}
+			if !(cte == "" || cte == "7bit" || cte == "8bit") {
+				log.Println("Warning: don't know how to handle Content-Type-Encoding", cte)
 			}
 		}
-		dst = quotedprintable.NewWriter(dst)
 		bytesWritten, err = handleHTMLPart(dst, part)
 	} else {
 		if strings.HasPrefix(mediaType, "multipart/") {
@@ -128,6 +125,9 @@ func handleMultiPart(dst io.Writer, mr *multipart.Reader, bound string) (int, er
 	// Insert the
 	bw, err := io.WriteString(dst, "This is a multi-part message in MIME format."+smtpCRLF)
 	bytesWritten += bw
+	// Create a part writer with the current boundary and header properties
+	pWrt := multipart.NewWriter(dst)
+	pWrt.SetBoundary(bound)
 	for {
 		p, err := mr.NextPart()
 		if err != nil {
@@ -137,42 +137,18 @@ func handleMultiPart(dst io.Writer, mr *multipart.Reader, bound string) (int, er
 			}
 			return bytesWritten, err // Unexpected error
 		}
-		// Create a part writer with the current boundary and header properties
-		pWrt := multipart.NewWriter(dst)
-		pWrt.SetBoundary(bound)
+		pWrt2, err := pWrt.CreatePart(p.Header)
+		if err != nil {
+			return bytesWritten, err
+		}
 		cType := p.Header.Get("Content-Type")
 		cte := p.Header.Get("Content-Transfer-Encoding")
-		// Set up the output part headers. html will always come out quoted-printable
-		ph := textproto.MIMEHeader{
-			"Content-Type":              []string{},
-			"Content-Transfer-Encoding": []string{},
-		}
-		ph.Set("Content-Type", cType)
-		var pWrt2 io.Writer
-		if strings.HasPrefix(cType, "text/html") {
-			ph.Set("Content-Transfer-Encoding", "quoted-printable")
-			pWrt2, err = pWrt.CreatePart(ph)
-			if err != nil {
-				return bytesWritten, err
-			}
-		} else {
-			ph.Set("Content-Transfer-Encoding", cte)
-			pWrt2, err = pWrt.CreatePart(ph)
-			if err != nil {
-				return bytesWritten, err
-			}
-		}
 		bw, err := handleMessagePart(pWrt2, p, cType, cte)
 		bytesWritten += bw
 		if err != nil {
 			return bytesWritten, err
 		}
-		// Put a newline in before the next part
-		bw, err = io.WriteString(dst, smtpCRLF)
-		bytesWritten += bw
 	}
-	// Put the terminating boundary in
-	bw, err = io.WriteString(dst, "--"+bound+smtpCRLF)
-	bytesWritten += bw
+	pWrt.Close() // Put the boundary in
 	return bytesWritten, err
 }

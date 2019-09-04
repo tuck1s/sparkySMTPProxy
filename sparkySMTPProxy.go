@@ -33,6 +33,7 @@ type Backend struct {
 	outHostPort        string
 	verbose            bool
 	requireUpstreamTLS bool
+	upstreamDebug      io.WriteCloser
 }
 
 func (bkd *Backend) logger(args ...interface{}) {
@@ -206,14 +207,13 @@ func (s *Session) DataCommand() (io.WriteCloser, int, string, error) {
 
 // Data body (dot delimited) pass upstream, returning the usual responses
 func (s *Session) Data(r io.Reader, w io.WriteCloser) (int, string, error) {
-
-	if true { // DEBUG
-		w, _ = os.Create("body-debug.eml")
-		s.upstream.DataResponseCode = 250
-		s.upstream.DataResponseMsg = "Fake OK from debugger"
+	var w2 io.Writer // If upstream debugging, tee off a copy into the debug file.
+	if s.bkd.upstreamDebug != nil {
+		w2 = io.MultiWriter(w, s.bkd.upstreamDebug)
+	} else {
+		w2 = w
 	}
-
-	bytesWritten, err := mailCopy(w, r)
+	bytesWritten, err := mailCopy(w2, r)
 	if err != nil {
 		msg := "DATA io.Copy error"
 		s.bkd.logger(respTwiddle(s), msg, err)
@@ -239,7 +239,8 @@ func main() {
 	verboseOpt := flag.Bool("verbose", false, "print out lots of messages")
 	certfile := flag.String("certfile", "", "Certificate file for this server")
 	privkeyfile := flag.String("privkeyfile", "", "Private key file for this server")
-	serverDebug := flag.String("server_debug", "", "File to write server SMTP conversation for debugging")
+	serverDebug := flag.String("server_debug", "", "File to write downstream server SMTP conversation for debugging")
+	upstreamDebug := flag.String("upstream_debug", "", "File to write upstream proxy SMTP conversation for debugging")
 	requireUpstreamTLS := flag.Bool("require_upstream_tls", false, "Force upstream server to TLS (raise error if it can't)")
 	flag.Parse()
 
@@ -287,13 +288,25 @@ func main() {
 	log.Println("Backend logging:", be.verbose)
 
 	if *serverDebug != "" {
-		dbgFile, err := os.OpenFile(*serverDebug, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		// Need local ref to the file, to allow Close() and Name() methods which io.Writer doesn't have
+		// Overwrite each time
+		dbgFile, err := os.OpenFile(*serverDebug, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer dbgFile.Close()
 		s.Debug = dbgFile
-		log.Println("Server logging SMTP commands and responses to", dbgFile.Name())
+		log.Println("Proxy logging SMTP commands, responses and downstream DATA to", dbgFile.Name())
+	}
+	if *upstreamDebug != "" {
+		// Overwrite each time
+		upstreamDbgFile, err := os.OpenFile(*upstreamDebug, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer upstreamDbgFile.Close()
+		be.upstreamDebug = upstreamDbgFile
+		log.Println("Proxy writing upstream DATA to", upstreamDbgFile.Name())
 	}
 
 	if err := s.ListenAndServe(); err != nil {
