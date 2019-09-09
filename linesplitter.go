@@ -2,7 +2,7 @@ package main
 
 import "io"
 
-// linesplitter is a class that can be used as an io.Writer, e.g. for base64 output
+// linesplitter is an io.Writer
 // See https://www.ietf.org/rfc/rfc2045.txt, section 6.8 for notes on maximum line length of 76 characters
 
 func min(a, b int) int {
@@ -20,7 +20,7 @@ type linesplitter struct {
 }
 
 // NewWriter splits input every len bytes with a sep byte sequence, outputting to writer w
-func (ls *linesplitter) NewWriter(len int, sep []byte, w io.Writer) io.WriteCloser {
+func (ls *linesplitter) NewWriter(len int, sep []byte, w io.Writer) io.Writer {
 	return &linesplitter{len: len, count: 0, sep: sep, w: w}
 }
 
@@ -52,8 +52,4 @@ func (ls *linesplitter) Write(in []byte) (n int, err error) {
 		chunkSize = min(inToGo, ls.len)
 	}
 	return writtenThisCall, nil
-}
-
-func (ls *linesplitter) Close() (err error) {
-	return nil
 }

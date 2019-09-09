@@ -6,3 +6,4 @@ debug*.txt
 *.code-workspace
 __debug_bin
 *.eml
+test-emails/*
